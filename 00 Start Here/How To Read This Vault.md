@@ -31,6 +31,8 @@ Jangan buka folder lain di jam pertama. Rasa penasaran untuk menjelajah seluruh 
 
 **Problem-driven** — ketika sesuatu rusak di kantor, cari di vault, baca hanya bagian yang menjawab masalah itu, lalu tandai note itu `learning`. Ini cara vault ini tetap hidup setelah first pass selesai — pengetahuan yang dipakai untuk memecahkan masalah nyata menempel jauh lebih kuat daripada yang dibaca tanpa tekanan.
 
+Ada cara keempat, **domain-depth**, yang jadi relevan begitu Level 1 selesai: alih-alih mengikuti peta lintas-domain di `01 Maps/`, satu folder domain dibaca tuntas dari junior sampai kedalaman maksimalnya sebelum pindah ke domain lain — ini sengaja dijelaskan terpisah di [[Reading By Domain Depth]] karena butuh langkah konkret sendiri (folder mana dulu, apa yang dilakukan kalau domain berikutnya belum selesai ditulis).
+
 ## Bagaimana Concept, Tool, dan Case Study Saling Melengkapi
 
 Tiga jenis note ini membentuk satu siklus, dan melewatkan salah satunya menghasilkan pemahaman yang timpang:
@@ -84,6 +86,7 @@ Setiap note diakhiri dengan bagian `## Catatan Saya` yang sengaja dikosongkan. N
 - [[Vault Conventions]] — detail frontmatter, tag, dan penamaan yang membuat semua query Dataview di vault ini bekerja.
 - [[Progress Tracker]] — tempat ritual mingguan di atas benar-benar dijalankan.
 - [[Backend Engineering Map]] — peta lengkap untuk mode graph-driven ketika kamu sudah siap menjelajah.
+- [[Reading By Domain Depth]] — langkah konkret untuk cara baca keempat, dipakai begitu vault ditulis per domain alih-alih per level.
 
 ## Catatan Saya
 
