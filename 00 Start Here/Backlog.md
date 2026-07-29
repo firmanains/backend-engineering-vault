@@ -39,18 +39,18 @@ Ditulis setiap kali sesi penulisan berhenti di tengah jalan, supaya sesi berikut
 
 - **Seluruh level junior selesai (89/89 note)**: `10 Foundations` (12/12), `20 Go Language` (17/17 junior), `30 APIs and Web` (21/21 junior), `40 Databases` (21/21 junior), `70 Infrastructure and Delivery` (4/4 junior), `80 Security` (10/10 junior), `90 Architecture and Design` (4/4 junior).
 - **`40 Databases` selesai penuh sampai kedalaman maksimalnya (43/43 note — 21 junior + 22 intermediate)**: seluruh note intermediate sudah ditulis, dari `B+Tree Structure` sampai `Keeping Search in Sync with the Source of Truth`. Domain ini **tidak** punya tingkat senior sendiri di manifest (sengaja, lihat `Curriculum Changelog.md` §"Keputusan Pemetaan Domain") — kelanjutan level senior untuk topik sharding, replication skala besar, dan migrasi berbasis CDC ada di `60 Distributed Systems` (klaster "Scalability" dan "Migration and evolution"), yang akan ditulis penuh saat gilirannya tiba di sequence domain, bukan dipecah sekarang.
-- **Ganti strategi build: dari level-breadth ke domain-depth.** Sejak `CLAUDE.md` §14 diperbarui, sesi berikutnya **tidak lagi** mengikuti `01 Maps/Level 2 - Intermediate Path.md` secara lintas-domain — satu domain dituntaskan penuh (intermediate lalu senior, sejauh manifest domain itu punya keduanya) sebelum pindah ke domain lain. `40 Databases` adalah pilot pertama pendekatan ini dan sudah selesai.
-- **Belum disentuh sama sekali**: seluruh note intermediate di domain lain (95, setelah dikurangi 22 milik `40 Databases` yang sudah selesai) dan seluruh 52 note senior, seluruh tool note (28), seluruh case study (25), semua project (3), dan glossary (1/20 — baru `Term - Ephemeral Port.md`).
+- **`20 Go Language` selesai penuh sampai kedalaman maksimalnya (23/23 note — 17 junior + 6 intermediate "Advanced Go")**: `Generics`, `Reflection and Its Costs`, `Embedding`, `Functional Options`, `Designing Stable Library APIs`, `Sentinel Errors vs Error Types`. Domain ini juga **tidak** punya tingkat senior sendiri (concurrency dan runtime Go sengaja dipetakan ke `50 Concurrency and Performance`, bukan ke sini — lihat `Curriculum Changelog.md`).
+- **Ganti strategi build: dari level-breadth ke domain-depth.** Sejak `CLAUDE.md` §14 diperbarui, sesi berikutnya **tidak lagi** mengikuti `01 Maps/Level 2 - Intermediate Path.md` secara lintas-domain — satu domain dituntaskan penuh (intermediate lalu senior, sejauh manifest domain itu punya keduanya) sebelum pindah ke domain lain. `40 Databases` adalah pilot pertama pendekatan ini; `20 Go Language` adalah yang kedua, sesuai urutan domain di `CLAUDE.md` §14.
+- **Belum disentuh sama sekali**: seluruh note intermediate di domain lain (89, setelah dikurangi 22 milik `40 Databases` dan 6 milik `20 Go Language` yang sudah selesai) dan seluruh 52 note senior, seluruh tool note (28), seluruh case study (25), semua project (3), dan glossary (1/20 — baru `Term - Ephemeral Port.md`).
 
-**Langkah berikutnya**: urutan domain setelah `40 Databases` sudah ditetapkan eksplisit di `CLAUDE.md` §14 ("Domain sequence after `40 Databases`"), disusun berdasarkan tujuan pembaca di §2, bukan urutan folder `10`–`92` secara linear:
+**Langkah berikutnya**: urutan domain sudah ditetapkan eksplisit di `CLAUDE.md` §14 ("Domain sequence after `40 Databases`"), disusun berdasarkan tujuan pembaca di §2, bukan urutan folder `10`–`92` secara linear. `40 Databases` dan `20 Go Language` sudah selesai (langkah 1 di daftar lama sudah tuntas); langkah berikutnya adalah:
 
-1. `20 Go Language` — 6 note Advanced Go (generics, reflection, embedding, functional options, stable library API design, sentinel errors vs error types).
-2. `50 Concurrency and Performance` — 32 note (Go concurrency, Go runtime/GMP/GC/pprof, performance, caching).
-3. `90 Architecture and Design` — 11 note (5 intermediate + 6 senior).
-4. `30 APIs and Web` — 31 note intermediate (integration, protokol lain, messaging/streaming, resilience).
-5. `80 Security` — 7 note senior (STRIDE, zero trust, mTLS, key management, encryption, audit logging, compliance trails).
-6. `70 Infrastructure and Delivery` — 21 note intermediate (CI/CD, Kubernetes, IaC, releases, observability).
-7. `60 Distributed Systems` — 39 note senior, dikerjakan terakhir supaya bertumpu pada fondasi dari langkah 2, 4, dan 6 — di sinilah kelanjutan senior `40 Databases` (sharding, replication, migrasi berbasis CDC) akhirnya ditulis.
+1. `50 Concurrency and Performance` — 32 note (Go concurrency, Go runtime/GMP/GC/pprof, performance, caching). **← berikutnya.**
+2. `90 Architecture and Design` — 11 note (5 intermediate + 6 senior).
+3. `30 APIs and Web` — 31 note intermediate (integration, protokol lain, messaging/streaming, resilience).
+4. `80 Security` — 7 note senior (STRIDE, zero trust, mTLS, key management, encryption, audit logging, compliance trails).
+5. `70 Infrastructure and Delivery` — 21 note intermediate (CI/CD, Kubernetes, IaC, releases, observability).
+6. `60 Distributed Systems` — 39 note senior, dikerjakan terakhir supaya bertumpu pada fondasi dari langkah 1, 3, dan 5 — di sinilah kelanjutan senior `40 Databases` (sharding, replication, migrasi berbasis CDC) akhirnya ditulis.
 
 `92 Tools` dan `94 Case Studies` bukan langkah terpisah — keduanya terus di-interleave dengan domain yang sedang didalami, sesuai aturan di `CLAUDE.md` §14.
 
