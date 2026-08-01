@@ -97,7 +97,12 @@ type permohonanService struct {
 	repo PermohonanRepository
 }
 
-func NewPermohonanService(repo PermohonanRepository) PermohonanUseCase {
+// Kembalikan tipe konkret, bukan interface — konsisten dengan idiom
+// "accept interfaces, return structs". Adapter yang memanggilnya tetap
+// menerima PermohonanUseCase kalau memang butuh mengetik variable secara
+// eksplisit sebagai interface (misalnya untuk field struct), tapi
+// constructor sendiri tidak memaksa itu.
+func NewPermohonanService(repo PermohonanRepository) *permohonanService {
 	return &permohonanService{repo: repo}
 }
 
@@ -107,23 +112,29 @@ func (s *permohonanService) Setujui(ctx context.Context, id int64) error {
 		return err
 	}
 	if p.Status != "menunggu" {
-		return errStatusTidakValid
+		return ErrStatusTidakValid
 	}
 	return s.repo.UbahStatus(ctx, id, "disetujui")
 }
 
-var errStatusTidakValid = &statusError{}
+// ErrStatusTidakValid diekspor supaya adapter bisa memetakannya ke
+// response yang sesuai lewat errors.Is, tanpa mengirim pesan error
+// internal apa adanya ke client.
+var ErrStatusTidakValid = &statusError{}
 
 type statusError struct{}
 
 func (e *statusError) Error() string { return "status tidak valid untuk persetujuan" }
 ```
 
+Mungkin terlihat bertentangan: bab ini bicara soal port berupa interface, tapi constructor-nya mengembalikan struct konkret. Keduanya konsisten, karena keduanya mengatur hal yang berbeda. `PermohonanUseCase` tetap layak ada sebagai interface di package `domain` — itu **port**-nya, kontrak formal yang ditawarkan inti ke dunia luar, dan dipakai dua adapter berbeda (`HTTPHandler`, `KonsumenKafkaSetujui`) untuk mengetik dependency mereka. Yang salah bukan keberadaan interface itu, melainkan constructor yang **mengembalikan** tipe interface alih-alih tipe konkret — begitu `NewPermohonanService` mengembalikan `PermohonanUseCase`, pemanggil kehilangan akses ke method lain yang mungkin dimiliki `*permohonanService` di luar yang dijanjikan interface itu, persis jebakan yang dilarang di [[../20 Go Language/Interfaces and Implicit Satisfaction|Interfaces and Implicit Satisfaction]]. Pemanggil yang butuh mengetik variable-nya sebagai `PermohonanUseCase` (seperti field `usecase` di `HTTPHandler` di bawah) tetap bisa melakukannya sendiri lewat assignment biasa — constructor tidak perlu memaksakan itu.
+
 ```go
 package adapter
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"example.com/app/domain"
@@ -138,7 +149,13 @@ type HTTPHandler struct {
 func (h *HTTPHandler) Setujui(w http.ResponseWriter, r *http.Request) {
 	id := parseID(r)
 	if err := h.usecase.Setujui(r.Context(), id); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
+		// Adapter menerjemahkan error domain ke bentuk HTTP — pesan internal
+		// tidak pernah dikirim apa adanya ke client.
+		if errors.Is(err, domain.ErrStatusTidakValid) {
+			http.Error(w, "permohonan tidak dalam status yang bisa disetujui", http.StatusConflict)
+			return
+		}
+		http.Error(w, "kesalahan internal", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -152,6 +169,8 @@ func KonsumenKafkaSetujui(ctx context.Context, usecase domain.PermohonanUseCase,
 	return usecase.Setujui(ctx, id)
 }
 ```
+
+Pemetaan `domain.ErrStatusTidakValid` ke pesan HTTP yang aman di `HTTPHandler.Setujui` adalah contoh konkret tanggung jawab adapter: menerjemahkan error domain ke bentuk yang cocok untuk dunia luar (di sini format response HTTP, lihat [[../30 APIs and Web/Consistent Error Responses|Consistent Error Responses]]), tanpa membocorkan detail internal apa pun ke client.
 
 ## In His Stack
 

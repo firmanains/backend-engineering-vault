@@ -912,7 +912,7 @@ kalau tidak ada yang mengonsumsinya dari dalam domain, ia justru contoh dari jeb
 "interface didefinisikan di sisi produser" yang note ini sendiri larang tiga baris di
 bawahnya.
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
@@ -947,7 +947,7 @@ if err := h.usecase.Setujui(r.Context(), id); err != nil {
 Ini sekaligus contoh bagus dari tanggung jawab adapter, jadi tambahkan satu kalimat yang
 menyebut itu.
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
