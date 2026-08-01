@@ -37,15 +37,15 @@ sequenceDiagram
     participant C as Client
     participant S as Server
 
-    C->>S: ClientHello (cipher suite yang didukung, versi TLS)
-    S->>C: ServerHello + Sertifikat + kunci publik sementara
-    Note over C: Verifikasi sertifikat terhadap trust store lokal
-    C->>S: Selesaikan pertukaran kunci, mulai turunkan kunci sesi
-    Note over C,S: Kedua sisi kini punya kunci sesi bersama
-    S->>C: Finished (terenkripsi)
+    C->>S: ClientHello (cipher suite, versi, key share)
+    Note over S: Server sudah bisa menurunkan kunci sesi di sini
+    S->>C: ServerHello + key share + Sertifikat +<br/>CertificateVerify + Finished (sebagian terenkripsi)
+    Note over C: Verifikasi rantai sertifikat terhadap trust store lokal
     C->>S: Finished (terenkripsi)
-    Note over C,S: Data aplikasi (HTTP, dll) mulai mengalir, terenkripsi
+    Note over C,S: Data aplikasi mulai mengalir — 1 round-trip sejak ClientHello
 ```
+
+Perhatikan bahwa client sudah mengirim key share-nya di `ClientHello`, dan server membalas seluruh sisanya dalam satu kiriman. Inilah alasan mekanis kenapa TLS 1.3 butuh lebih sedikit round-trip dibanding TLS 1.2, yang mengharuskan pertukaran kunci berlangsung dalam kiriman terpisah setelah sertifikat diterima.
 
 Poin penting: verifikasi sertifikat bukan sekadar "apakah sertifikatnya valid", tapi apakah **rantai kepercayaan lengkap** dari sertifikat server sampai ke root CA yang ada di trust store klien bisa dibuktikan. Kalau server hanya mengirim sertifikatnya sendiri tanpa sertifikat intermediate yang menghubungkannya ke root CA, klien yang ketat (seperti `crypto/tls` Go secara default) akan menolak koneksi — inilah akar masalah di skenario "The Problem" di atas.
 

@@ -18,7 +18,7 @@ created: 2026-07-29
 
 ## The Problem
 
-Dua petugas membuka form yang sama untuk memperbarui status permohonan hampir bersamaan. Petugas A membaca status permohonan sebagai "menunggu", memutuskan untuk mengubahnya jadi "diverifikasi", dan menyimpan. Petugas B, yang membaca status permohonan **sebelum** perubahan petugas A ter-`commit`, juga melihat "menunggu", memutuskan mengubahnya jadi "ditolak" berdasarkan alasan berbeda, dan menyimpan setelah petugas A. Hasil akhirnya "ditolak" menimpa "diverifikasi" tanpa satu pun dari kedua petugas menyadari ada perubahan lain yang terjadi di antaranya — bukan karena mereka lalai, tapi karena isolation level yang dipakai tidak cukup ketat untuk mendeteksi bahwa data yang mereka baca berpotensi sudah usang di titik mereka menyimpan.
+Dua petugas membuka form yang sama untuk memperbarui status permohonan hampir bersamaan. Petugas A membaca status permohonan sebagai "menunggu", memutuskan untuk mengubahnya jadi "diverifikasi", dan menyimpan. Petugas B, yang membaca status permohonan **sebelum** perubahan petugas A ter-`commit`, juga melihat "menunggu", memutuskan mengubahnya jadi "ditolak" berdasarkan alasan berbeda, dan menyimpan setelah petugas A. Hasil akhirnya "ditolak" menimpa "diverifikasi" tanpa satu pun dari kedua petugas menyadari ada perubahan lain yang terjadi di antaranya — bukan karena mereka lalai, tapi karena isolation level yang dipakai tidak cukup ketat untuk mendeteksi bahwa data yang mereka baca berpotensi sudah usang di titik mereka menyimpan. Anomali ini punya nama: **lost update** — perubahan petugas A hilang begitu saja, ditimpa tanpa terdeteksi.
 
 Skenario kedua yang lebih halus, dikenal sebagai **write skew**: dua dokter jaga di rumah sakit, aturan bisnis mengatakan minimal satu dokter harus tetap "on call" setiap saat. Dokter A memeriksa: "apakah ada dokter lain yang on call selain saya?" — melihat dokter B masih on call, memutuskan aman untuk dirinya sendiri keluar dari status on call. Nyaris bersamaan, dokter B melakukan pemeriksaan yang sama — melihat dokter A masih on call, memutuskan dirinya juga aman untuk keluar. Kedua transaction ini, dilihat secara terpisah, **masing-masing valid** menurut kondisi yang mereka baca — tapi hasil akhirnya melanggar aturan bisnis (tidak ada dokter yang on call sama sekali), karena masing-masing transaction memeriksa kondisi yang dipengaruhi keputusan transaction lain yang belum terlihat saat pemeriksaan dilakukan. Ini adalah anomali yang **tidak** dicegah oleh `REPEATABLE READ` sekalipun — hanya `SERIALIZABLE` (atau penguncian eksplisit) yang benar-benar menutupnya.
 
@@ -35,14 +35,16 @@ Analogi ini bocor pada satu hal penting: whiteboard fisik hanya punya satu "vers
 
 ## How It Works
 
-| Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read | Write Skew |
-|---|---|---|---|---|
-| `READ UNCOMMITTED` | Mungkin | Mungkin | Mungkin | Mungkin |
-| `READ COMMITTED` | Dicegah | Mungkin | Mungkin | Mungkin |
-| `REPEATABLE READ` | Dicegah | Dicegah | Mungkin* | Mungkin |
-| `SERIALIZABLE` | Dicegah | Dicegah | Dicegah | Dicegah |
+| Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read | **Lost Update** | Write Skew |
+|---|---|---|---|---|---|
+| `READ UNCOMMITTED` | Mungkin | Mungkin | Mungkin | **Mungkin** | Mungkin |
+| `READ COMMITTED` | Dicegah | Mungkin | Mungkin | **Mungkin** | Mungkin |
+| `REPEATABLE READ` | Dicegah | Dicegah | Mungkin* | **Tergantung mesin\*\*** | Mungkin |
+| `SERIALIZABLE` | Dicegah | Dicegah | Dicegah | **Dicegah** | Dicegah |
 
 *Catatan penting: standar SQL mengizinkan phantom read di `REPEATABLE READ`, tapi implementasi InnoDB (MySQL/MariaDB) di level `REPEATABLE READ` **secara praktis mencegah** sebagian besar kasus phantom read lewat mekanisme *next-key locking* — sebuah penyimpangan dari standar yang justru menguntungkan, tapi juga sumber kebingungan karena nama level yang sama tidak menjamin perilaku identik lintas mesin database.
+
+\*\* Lost update adalah contoh paling jelas bahwa nama isolation level yang sama tidak menjamin perilaku yang sama. Pada `REPEATABLE READ`, PostgreSQL membatalkan transaction kedua dengan serialization failure (aplikasi wajib retry), sementara InnoDB membiarkan pola "baca dulu di aplikasi, lalu `UPDATE` berdasarkan nilai yang dibaca" tetap saling menimpa. Pertahanan yang berlaku di kedua mesin: `SELECT ... FOR UPDATE` sebelum membaca, atau `UPDATE` bersyarat yang menyertakan nilai lama di `WHERE` (optimistic locking).
 
 > [!question] Perlu diverifikasi
 > Klaim: InnoDB `REPEATABLE READ` mencegah sebagian besar phantom read lewat next-key locking, menyimpang dari standar SQL yang mengizinkannya di level ini.

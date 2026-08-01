@@ -69,11 +69,14 @@ Sisi yang mengirim `FIN` pertama kali (dalam kebanyakan kasus request-response s
 `net/http` di Go sudah menyediakan connection pooling secara default lewat `http.Transport` — tapi hanya kalau kamu memakai ulang **client atau transport yang sama**, bukan membuat baru setiap kali.
 
 ```go
-// Naif: http.Client baru dibuat setiap kali function ini dipanggil.
-// Setiap panggilan membuka koneksi TCP baru dan menutupnya lagi —
-// tidak ada connection reuse, TIME_WAIT menumpuk di sisi client.
+// Naif: Transport BARU dibuat setiap panggilan. Setiap Transport punya
+// connection pool sendiri, jadi tidak ada koneksi yang bisa dipakai ulang —
+// koneksi TCP dibuka lalu ditutup terus-menerus, dan TIME_WAIT menumpuk.
 func callPartnerNaif(ctx context.Context, url string) ([]byte, error) {
-    client := &http.Client{Timeout: 5 * time.Second}
+    client := &http.Client{
+        Timeout:   5 * time.Second,
+        Transport: &http.Transport{}, // <- inilah sumber masalahnya
+    }
     req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
     if err != nil {
         return nil, fmt.Errorf("build request: %w", err)
@@ -85,7 +88,11 @@ func callPartnerNaif(ctx context.Context, url string) ([]byte, error) {
     defer resp.Body.Close()
     return io.ReadAll(resp.Body)
 }
+```
 
+`&http.Client{}` tanpa field `Transport` memakai `http.DefaultTransport`, yang dibagikan seluruh aplikasi, jadi ia tetap memakai ulang koneksi. Yang mematikan connection reuse adalah membuat `http.Transport` baru — dan itu sering dilakukan tanpa sadar, misalnya saat seseorang menyalin kode yang menyetel `TLSClientConfig` atau proxy ke dalam sebuah helper function.
+
+```go
 // Production: satu http.Client dipakai ulang lintas semua pemanggilan,
 // dibuat sekali di level package/service, bukan per request.
 var partnerClient = &http.Client{

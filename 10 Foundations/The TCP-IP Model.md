@@ -24,7 +24,9 @@ Masalah sesungguhnya, dalam kasus seperti ini, sering ada jauh di bawah lapisan 
 
 ## Intuition
 
-Bayangkan mengirim surat lewat pos internasional sebagai **amplop di dalam amplop**. Amplop terluar hanya berisi alamat pengiriman antar-negara (analog dengan Internet layer — IP, routing lintas jaringan). Di dalamnya ada amplop yang menyebut kurir mana dan rute lokal mana yang harus dipakai (Link layer — bagaimana bit sungguhan dikirim di kabel/wifi setempat). Di dalam amplop itu lagi, ada instruksi "ini surat tercatat, harus dikonfirmasi diterima" (Transport layer — TCP menjamin pengiriman, UDP tidak). Dan baru di paling dalam, isi surat yang sebenarnya (Application layer — pesan yang benar-benar ingin disampaikan, seperti HTTP).
+Bayangkan mengirim surat lewat pos internasional sebagai **amplop di dalam amplop**. Isi surat yang sebenarnya — pesan yang ingin kamu sampaikan — ada di paling dalam (Application layer, misalnya HTTP). Ia dimasukkan ke amplop yang menyatakan "ini surat tercatat, harus dikonfirmasi diterima" (Transport layer — TCP atau UDP). Amplop itu dimasukkan lagi ke amplop yang menulis alamat lengkap negara tujuan (Internet layer — IP). Dan amplop itu, terakhir, dimasukkan ke kantong kurir yang hanya tahu rute dari kantor pos ini ke kantor pos berikutnya (Link layer — Ethernet atau WiFi).
+
+Urutan ini penting dan sering dibalik orang: yang **paling luar** adalah lapisan yang **paling dekat kabel**, bukan yang paling dekat aplikasi. Itu sebabnya router di tengah jalan cukup membuka satu lapis terluar untuk tahu ke mana meneruskan paket — ia tidak pernah perlu membuka isi surat.
 
 Analogi ini bocor di titik yang penting untuk diketahui: pembagian rapi "amplop di dalam amplop" ini tidak selalu seketat itu di implementasi nyata. Beberapa protokol modern mengaburkan batas antar lapisan demi performa atau keamanan (misalnya QUIC, dasar dari HTTP/3, menggabungkan sebagian tanggung jawab transport dan enkripsi jadi satu). Model empat lapis ini adalah kerangka berpikir yang sangat berguna, bukan hukum fisika yang selalu dipatuhi persis oleh setiap protokol baru.
 

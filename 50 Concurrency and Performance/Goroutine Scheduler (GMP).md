@@ -24,7 +24,7 @@ Masalah kedua yang lebih mendasar: seorang developer bingung kenapa sebuah gorou
 
 ## Intuition
 
-Bayangkan model GMP seperti **sistem kerja di sebuah kantor dengan meja terbatas dan banyak pegawai**. **G** (goroutine) adalah setiap tugas kerja yang perlu diselesaikan — bisa jumlahnya ribuan. **M** (OS thread) adalah pegawai sungguhan yang benar-benar mengerjakan tugas — jumlahnya dibatasi oleh berapa banyak "kursi fisik" yang bisa dipakai bekerja bersamaan (mendekati jumlah core CPU). **P** (processor, konteks penjadwalan) adalah **meja kerja** dengan antrean tugasnya sendiri — jumlah meja dibatasi `GOMAXPROCS`, dan setiap meja hanya bisa dipakai satu pegawai (M) pada satu waktu, memproses antrean tugas (G) di meja itu satu per satu, sambil sesekali "mengintip" antrean meja lain kalau meja sendiri sudah kosong (work stealing).
+Bayangkan model GMP seperti **sistem kerja di sebuah kantor dengan meja terbatas dan banyak pegawai**. **G** (goroutine) adalah setiap tugas kerja yang perlu diselesaikan — bisa jumlahnya ribuan. **M** (OS thread) adalah pegawai sungguhan yang benar-benar mengerjakan tugas. Jumlah M tidak dibatasi jumlah core: runtime menambah pegawai baru setiap kali ada pegawai lama yang tersangkut menunggu sesuatu di luar kantor (syscall yang memblokir). Yang dibatasi adalah jumlah **meja kerja (P)** — itulah yang menentukan berapa banyak pegawai bisa benar-benar bekerja pada satu waktu, karena pegawai tanpa meja tidak mengerjakan apa pun. Jumlah meja diatur `GOMAXPROCS`, biasanya mendekati jumlah core CPU, dan setiap meja hanya bisa dipakai satu pegawai pada satu waktu, memproses antrean tugas (G) di meja itu satu per satu, sambil sesekali "mengintip" antrean meja lain kalau meja sendiri sudah kosong (work stealing).
 
 Analogi ini bocor pada satu hal: pegawai kantor sungguhan yang sedang menulis laporan panjang (komputasi berat tanpa jeda) akan terus terlihat sibuk di meja yang sama tanpa gangguan. Goroutine yang menjalankan komputasi berat tanpa titik jeda alami (tanpa panggilan fungsi yang bisa "diinterupsi" scheduler) dulu (sebelum Go 1.14) bisa benar-benar memblokir goroutine lain di P yang sama tanpa batas — situasi yang diperbaiki lewat mekanisme **preemption asinkron** yang ditambahkan kemudian, dibahas detail di [[Preemption]].
 
@@ -40,8 +40,8 @@ flowchart TD
     end
     M1["M (OS Thread) 1"] --> P1
     M2["M (OS Thread) 2"] --> P2
-    P1 --> CPU1["CPU Core 1"]
-    P2 --> CPU2["CPU Core 2"]
+    M1 --> CPU1["CPU Core 1"]
+    M2 --> CPU2["CPU Core 2"]
     Q1 -.->|"work stealing jika\nantrean P lain kosong"| Q2
 ```
 
@@ -52,6 +52,8 @@ Diagram ini menunjukkan struktur inti: setiap **P** punya antrean goroutine loka
 **Kapan M dilepas dari P**: ketika goroutine yang sedang dijalankan M melakukan operasi yang **memblokir** (syscall I/O seperti membaca file atau membuka koneksi jaringan), Go runtime **melepaskan** M itu dari P-nya (M yang blocking dibiarkan menunggu syscall selesai) dan **memasang M lain** (atau membuat M baru) ke P itu supaya P tetap bisa melanjutkan menjalankan goroutine lain di antreannya — inilah mekanisme kunci yang membuat goroutine yang menunggu I/O tidak "membekukan" seluruh P tempatnya berjalan.
 
 ## Under The Hood
+
+Jumlah M bisa jauh melebihi jumlah P. Setiap M yang sedang tersangkut di blocking syscall tidak memegang P, jadi ia tidak memakan kuota paralelisme — ia hanya memakan memori stack thread. Ini kenapa program yang banyak memanggil cgo atau operasi file blocking bisa punya jumlah OS thread yang mengejutkan tingginya, tanpa itu berarti ada bug.
 
 **Local run queue vs global run queue**: setiap P punya antrean lokal (kapasitas terbatas, biasanya 256 goroutine) untuk goroutine yang siap dijalankan — mengambil dari antrean lokal jauh lebih murah (tidak butuh lock) dibanding mengambil dari **antrean global** yang dibagikan seluruh P (butuh lock, dipakai saat antrean lokal penuh atau kosong). Desain dua tingkat ini menyeimbangkan kecepatan (antrean lokal, tanpa kontensi) dengan keadilan distribusi beban (antrean global dan work stealing, mencegah satu P kebanjiran sementara yang lain menganggur).
 
