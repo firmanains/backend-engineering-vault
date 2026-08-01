@@ -14,7 +14,7 @@ created: 2026-07-26
 
 ## TL;DR
 
-Map di Go adalah hash table, diakses lewat header yang berperilaku seperti slice — meng-copy variable map hanya menyalin header-nya, bukan isi datanya, jadi dua variable map bisa saling menunjuk hash table yang sama persis. Urutan iterasi map **sengaja diacak** setiap kali dijalankan, supaya tidak ada kode yang diam-diam bergantung pada urutan tertentu. Yang paling penting untuk backend engineer: **map bukan tipe data yang aman diakses dari banyak goroutine sekaligus tanpa sinkronisasi** — akses konkuren (satu goroutine menulis sementara yang lain membaca atau menulis) bisa membuat program crash secara sengaja (`fatal error: concurrent map writes`), dan ini adalah kategori bug yang mungkin sama sekali baru bagi engineer yang datang dari PHP klasik.
+Map di Go adalah hash table yang diakses lewat **sebuah pointer**. Meng-copy variable map hanya menyalin pointer itu, bukan isi hash table-nya — dua variable map bisa menunjuk hash table yang sama persis. Ini **mirip tapi tidak sama** dengan slice: slice membawa header tiga-field (pointer, len, cap) sebagai value, sehingga `append` bisa menghasilkan header baru yang tidak terlihat pemanggil, sementara map tidak punya perilaku semacam itu — setiap perubahan pada map selalu terlihat oleh semua variable yang menunjuk ke sana. Urutan iterasi map **sengaja diacak** setiap kali dijalankan, supaya tidak ada kode yang diam-diam bergantung pada urutan tertentu. Yang paling penting untuk backend engineer: **map bukan tipe data yang aman diakses dari banyak goroutine sekaligus tanpa sinkronisasi** — akses konkuren (satu goroutine menulis sementara yang lain membaca atau menulis) bisa membuat program crash secara sengaja (`fatal error: concurrent map writes`), dan ini adalah kategori bug yang mungkin sama sekali baru bagi engineer yang datang dari PHP klasik.
 
 ## The Problem
 
@@ -35,7 +35,12 @@ Analogi "membanting pintu" ini bocor pada soal seberapa bisa diandalkannya detek
 
 ## How It Works
 
-Map Go diimplementasikan sebagai hash table yang datanya disimpan dalam struktur bucket internal. Variable map yang kamu tulis di kode (`m := map[string]int{}`) sebenarnya adalah pointer ke struktur internal ini — meng-copy variable map ke variable lain, atau mengopernya ke function, hanya menyalin pointer itu, **bukan** seluruh isi hash table-nya. Ini artinya dua variable map bisa jadi "dua nama untuk hash table yang sama persis", mirip dengan slice.
+Map Go diimplementasikan sebagai hash table yang datanya disimpan dalam struktur bucket internal. Variable map yang kamu tulis di kode (`m := map[string]int{}`) adalah pointer ke struktur internal ini — meng-copy variable map ke variable lain, atau mengopernya ke function, hanya menyalin pointer itu, **bukan** seluruh isi hash table-nya. Ini artinya dua variable map bisa jadi "dua nama untuk hash table yang sama persis" — beda dengan slice, yang membawa header tiga-field sebagai value (lihat [[Slice Internals]]).
+
+> [!question] Perlu diverifikasi
+> Klaim: struktur internal map Go berupa "bucket".
+> Kenapa ragu: implementasi map Go pernah diganti secara mendasar di rilis yang relatif baru, dan istilah internalnya ikut berubah. Perilaku yang terlihat dari luar (urutan iterasi diacak, tidak aman diakses konkuren) tidak berubah, tapi deskripsi internalnya bisa sudah usang.
+> Cara verifikasi: release notes Go untuk versi yang dipakai, dan komentar di source `runtime/map*.go`.
 
 Zero value map adalah `nil`. Map `nil` **aman dibaca** (mengembalikan zero value tipe hasilnya kalau key tidak ditemukan) tapi **panic kalau ditulis** — perbedaan yang sering mengejutkan pemula yang lupa memakai `make()` sebelum menulis ke map.
 

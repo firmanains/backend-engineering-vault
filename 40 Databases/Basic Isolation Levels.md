@@ -32,21 +32,30 @@ Analogi ini bocor pada satu hal: "membekukan seluruh ruang kerja" di dunia nyata
 
 Empat isolation level standar SQL, dari paling longgar ke paling ketat:
 
-| Level | Mengizinkan | Biaya relatif |
-|---|---|---|
-| `READ UNCOMMITTED` | Bisa membaca data yang belum di-`COMMIT` transaction lain ("dirty read") | Paling murah, paling jarang dipakai serius |
-| `READ COMMITTED` | Hanya membaca data yang sudah di-`COMMIT`, tapi nilai bisa berubah antar baca dalam transaction yang sama | Default PostgreSQL |
-| `REPEATABLE READ` | Nilai yang sudah dibaca tetap sama sepanjang transaction, tapi baris **baru** yang cocok kondisi bisa muncul ("phantom read") | Default MySQL/MariaDB (InnoDB) |
-| `SERIALIZABLE` | Transaction berjalan seolah-olah dieksekusi satu per satu secara berurutan, tanpa tumpang tindih sama sekali | Paling ketat, paling mahal |
+| Level | Mengizinkan | Biaya relatif | Default di mesin |
+|---|---|---|---|
+| `READ UNCOMMITTED` | Bisa membaca data yang belum di-`COMMIT` transaction lain ("dirty read") | Paling murah, paling jarang dipakai serius | — |
+| `READ COMMITTED` | Hanya membaca data yang sudah di-`COMMIT`, tapi nilai bisa berubah antar baca dalam transaction yang sama | Lebih murah dari `REPEATABLE READ` | PostgreSQL |
+| `REPEATABLE READ` | Nilai yang sudah dibaca tetap sama sepanjang transaction, tapi baris **baru** yang cocok kondisi bisa muncul ("phantom read") | Lebih mahal dari `READ COMMITTED` | MySQL/MariaDB (InnoDB) |
+| `SERIALIZABLE` | Transaction berjalan seolah-olah dieksekusi satu per satu secara berurutan, tanpa tumpang tindih sama sekali | Paling ketat, paling mahal | — |
 
 Pembahasan detail anomali (dirty read, non-repeatable read, phantom read, write skew) dan trade-off performa masing-masing level ada di [[Isolation Levels and Their Anomalies]], level intermediate — note ini fokus pada gambaran besar yang wajib dipahami lebih dulu.
 
 ```sql
--- Mengatur isolation level untuk satu transaction
-START TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+-- PostgreSQL
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+-- ... operasi transaction ...
+COMMIT;
+
+-- MySQL / MariaDB — isolation level diset SEBELUM transaction dimulai,
+-- tidak bisa digabung ke dalam satu statement START TRANSACTION.
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION;
 -- ... operasi transaction ...
 COMMIT;
 ```
+
+Perbedaan sintaks sekecil ini adalah contoh konkret kenapa menyetel isolation level lewat `sql.TxOptions` di Go lebih aman daripada menuliskannya sebagai SQL mentah — driver yang menerjemahkannya ke dialek yang benar.
 
 Poin paling praktis untuk diingat sekarang: **default berbeda antar mesin database**. Kode yang ditulis dan diuji terhadap MariaDB (default `REPEATABLE READ`) mengandalkan jaminan yang tidak otomatis berlaku kalau dijalankan terhadap PostgreSQL tanpa konfigurasi eksplisit (default `READ COMMITTED`, lebih longgar) — dan sebaliknya.
 

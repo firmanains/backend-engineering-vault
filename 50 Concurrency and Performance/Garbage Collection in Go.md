@@ -44,7 +44,11 @@ Diagram ini menunjukkan bahwa mayoritas pekerjaan GC (mark dan sweep) berjalan *
 
 ## Under The Hood
 
-**`GOMEMLIMIT`** (ditambahkan di rilis Go yang relatif baru) memberi cara berbeda mengontrol GC — alih-alih rasio pertumbuhan (`GOGC`), ia menetapkan **batas absolut** memori yang boleh dipakai runtime Go sebelum GC dipicu lebih agresif, berguna khususnya untuk aplikasi yang berjalan di container dengan memory limit ketat (Kubernetes) di mana batas absolut lebih relevan daripada rasio pertumbuhan relatif. Kombinasi `GOGC` dan `GOMEMLIMIT` memberi kontrol yang lebih presisi: `GOMEMLIMIT` sebagai batas keras untuk mencegah OOM kill, `GOGC` sebagai penyetel trade-off CPU-vs-memori dalam batas itu.
+**`GOMEMLIMIT`** (ditambahkan di rilis Go yang relatif baru) memberi cara berbeda mengontrol GC: alih-alih rasio pertumbuhan (`GOGC`), ia menetapkan batas memori yang boleh dipakai runtime Go sebelum GC dipicu lebih agresif. Ini berguna khususnya untuk aplikasi yang berjalan di container dengan memory limit ketat (Kubernetes), di mana mengacu ke angka memori total lebih relevan daripada rasio pertumbuhan relatif.
+
+`GOMEMLIMIT` adalah **batas lunak (soft limit)**, bukan batas keras. Saat pemakaian mendekati angka itu, GC bekerja jauh lebih agresif — tapi kalau program memang butuh lebih, runtime akan melampauinya daripada membuat program macet total. Ia juga hanya mengatur memori yang dikelola runtime Go. Memori yang dipegang library C lewat cgo tidak ikut terhitung.
+
+Kombinasi `GOGC` dan `GOMEMLIMIT` tetap memberi kontrol yang lebih presisi: `GOMEMLIMIT` menahan pertumbuhan memori mendekati limit container, `GOGC` menyetel trade-off CPU-vs-memori dalam batas itu.
 
 > [!question] Perlu diverifikasi
 > Klaim: nilai default GOGC=100 dan detail interaksi GOMEMLIMIT dengan GOGC.
@@ -75,8 +79,8 @@ func main() {
 	// memori dibiarkan tumbuh lebih besar sebelum GC dipicu.
 	debug.SetGCPercent(200)
 
-	// GOMEMLIMIT (Go 1.19+) menetapkan batas memori ABSOLUT — berguna
-	// khusus untuk container dengan memory limit ketat.
+	// GOMEMLIMIT (Go 1.19+) menetapkan batas memori sebagai soft limit,
+	// bukan hard limit — berguna untuk container dengan memory limit ketat.
 	debug.SetMemoryLimit(500 * 1024 * 1024) // contoh: batas 500 MB
 }
 ```
@@ -105,6 +109,9 @@ Menurunkan `GOGC` (GC lebih sering) mengurangi pemakaian memori puncak tapi mena
 
 > [!warning] Jebakan
 > Menyalahkan "Go GC lambat" untuk masalah latency yang sebenarnya disebabkan pola alokasi memori berlebihan di kode aplikasi sendiri — mengurangi alokasi yang tidak perlu (dibahas di [[Reducing Allocations]]) seringkali jauh lebih efektif dibanding menyetel parameter GC.
+
+> [!warning] Jebakan
+> Menyetel `GOMEMLIMIT` persis sama dengan memory limit container, lalu menganggap OOM kill tidak mungkin terjadi lagi. `GOMEMLIMIT` adalah batas lunak dan hanya mencakup memori yang dikelola runtime Go — sisakan margin nyata (misalnya setel di sekitar 80-90% dari limit container, lalu ukur), dan tetap pantau pemakaian memori proses sesungguhnya, bukan hanya angka heap dari `runtime.MemStats`.
 
 ## Exercises
 
