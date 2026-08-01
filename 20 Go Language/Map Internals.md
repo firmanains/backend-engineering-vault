@@ -143,7 +143,7 @@ func (c *CacheAman) Get(key string) int {
 - [[../50 Concurrency and Performance/The Sync Package|The Sync Package]] — pembahasan penuh `sync.Mutex`, `sync.RWMutex`, dan `sync.Map` yang disinggung di note ini.
 - [[../50 Concurrency and Performance/Race Conditions and the Race Detector|Race Conditions and the Race Detector]] — alat (`go test -race`) untuk menangkap bug akses konkuren map sebelum production.
 - [[../50 Concurrency and Performance/Goroutines|Goroutines]] — unit concurrency yang membuat masalah di note ini mungkin terjadi sejak awal.
-- [[../40 Databases/Connection Pooling|Connection Pooling]] — pola cache in-memory yang sering dipasangkan dengan cache map lokal seperti di note ini, sebelum meningkat ke Redis untuk cache terdistribusi.
+- [[../50 Concurrency and Performance/Cache-Aside, Write-Through, and Write-Behind|Cache-Aside, Write-Through, and Write-Behind]] — cache map in-memory di note ini adalah bentuk paling sederhana dari cache-aside; note itu membahas kapan ia perlu naik jadi cache terdistribusi.
 
 ## Further Reading
 
