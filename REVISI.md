@@ -1297,7 +1297,7 @@ Kalau keempatnya sudah berada di dalam blok kode ```yaml, tidak ada yang perlu d
 Obsidian tidak merender wikilink di dalam code fence. **Periksa dulu.** Kalau ternyata
 ada yang di luar code fence, bungkus atau ganti dengan nama note yang benar-benar ada.
 
-- [ ] Diperiksa
+- [x] Diperiksa
 
 ### F-2 · Berkas yang tidak sesuai konvensi
 
