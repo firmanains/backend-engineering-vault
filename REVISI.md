@@ -1482,7 +1482,7 @@ sekali; pembaca hanya bisa menghafalnya.
 > bisa langsung memakainya. Saat ia kembali, ia harus antre mendapat meja lagi sebelum
 > boleh melanjutkan.
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
@@ -1518,7 +1518,7 @@ detailnya.
 Ini juga menyiapkan pembaca untuk `MVCC` dan untuk kewajiban retry di `SERIALIZABLE`,
 dua hal yang analogi "membekukan" justru menghalangi.
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
