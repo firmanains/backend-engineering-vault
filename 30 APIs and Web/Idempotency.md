@@ -52,11 +52,12 @@ Server perlu menyimpan pasangan `(idempotency key, hasil response)` untuk jangka
 
 ```go
 type IdempotencyStore interface {
-    // Reservasi atomik: mengembalikan (hasil tersimpan, true) kalau key
-    // sudah ada, atau (nil, false) dan MEREGISTRASI key ini kalau baru —
-    // SEKALIGUS dalam satu operasi atomik untuk menghindari race condition.
-    ReservasiAtauAmbil(ctx context.Context, key string) (hasil []byte, sudahAda bool, err error)
-    Simpan(ctx context.Context, key string, hasil []byte) error
+    // Reservasi atomik: mengembalikan (hasil tersimpan, status code tersimpan,
+    // true) kalau key sudah ada, atau (nil, 0, false) dan MEREGISTRASI key ini
+    // kalau baru — SEKALIGUS dalam satu operasi atomik untuk menghindari race
+    // condition.
+    ReservasiAtauAmbil(ctx context.Context, key string) (hasil []byte, statusCode int, sudahAda bool, err error)
+    Simpan(ctx context.Context, key string, statusCode int, hasil []byte) error
 }
 
 func handleSubmitPermohonan(store IdempotencyStore) http.HandlerFunc {
@@ -67,15 +68,16 @@ func handleSubmitPermohonan(store IdempotencyStore) http.HandlerFunc {
             return
         }
 
-        hasilTersimpan, sudahAda, err := store.ReservasiAtauAmbil(r.Context(), key)
+        hasilTersimpan, statusTersimpan, sudahAda, err := store.ReservasiAtauAmbil(r.Context(), key)
         if err != nil {
             http.Error(w, "kesalahan internal", http.StatusInternalServerError)
             return
         }
         if sudahAda {
-            // Percobaan ulang terdeteksi — kembalikan hasil yang SAMA,
-            // JANGAN proses permohonan baru.
+            // Percobaan ulang terdeteksi — kembalikan response yang SAMA
+            // persis (status code dan body), JANGAN proses permohonan baru.
             w.Header().Set("Content-Type", "application/json")
+            w.WriteHeader(statusTersimpan)
             w.Write(hasilTersimpan)
             return
         }
@@ -86,8 +88,19 @@ func handleSubmitPermohonan(store IdempotencyStore) http.HandlerFunc {
             return
         }
 
-        hasil, _ := json.Marshal(permohonan)
-        store.Simpan(r.Context(), key, hasil)
+        hasil, err := json.Marshal(permohonan)
+        if err != nil {
+            http.Error(w, "kesalahan internal", http.StatusInternalServerError)
+            return
+        }
+
+        // Kalau penyimpanan key gagal, request ini TIDAK boleh dilaporkan sukses:
+        // retry berikutnya akan diproses sebagai request baru dan menghasilkan
+        // duplikasi — persis yang seharusnya dicegah mekanisme ini.
+        if err := store.Simpan(r.Context(), key, http.StatusCreated, hasil); err != nil {
+            http.Error(w, "kesalahan internal", http.StatusInternalServerError)
+            return
+        }
 
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(http.StatusCreated)
