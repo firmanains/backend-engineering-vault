@@ -69,8 +69,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -150,15 +150,19 @@ func TanganiWebhook(antrean chan<- []byte, kejadian PenyimpanKejadian) http.Hand
 		case antrean <- payload:
 			w.WriteHeader(http.StatusOK)
 		default:
-			// antrean penuh — tetap 200 agar partner tidak retry,
-			// TAPI log untuk investigasi (idealnya ada circuit breaker
-			// di sisi antrean, di luar cakupan contoh ini)
-			w.WriteHeader(http.StatusOK)
-			fmt.Println("PERINGATAN: antrean webhook penuh, payload mungkin hilang")
+			// Antrean penuh: JANGAN balas 200. Balas 503 supaya partner
+			// mengirim ulang nanti — kehilangan notifikasi jauh lebih mahal
+			// daripada satu retry tambahan dari sisi partner.
+			slog.WarnContext(r.Context(), "antrean webhook penuh, meminta partner retry",
+				"event_id", idKejadian)
+			w.Header().Set("Retry-After", "30")
+			http.Error(w, "sedang sibuk, coba lagi", http.StatusServiceUnavailable)
 		}
 	}
 }
 ```
+
+Perhatikan bahwa jawaban yang benar di sini adalah **menolak dengan jujur**, bukan menerima lalu membuang. `503` memberi tahu partner untuk mengirim ulang; `200` yang palsu menghancurkan satu-satunya jaring pengaman yang tersedia. Kalau antrean in-memory sering penuh, itu sinyal bahwa antrean seharusnya durabel (database atau message broker) — bukan alasan untuk menaikkan ukuran channel.
 
 ## In His Stack
 
