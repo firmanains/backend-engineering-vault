@@ -632,7 +632,7 @@ if err := store.Simpan(r.Context(), key, hasil); err != nil {
 Perluas juga `IdempotencyStore` agar menyimpan status code, dan pada jalur replay panggil
 `w.WriteHeader(statusTersimpan)` sebelum menulis body.
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
@@ -674,7 +674,7 @@ Tambahkan penjelasan sesudah snippet:
 > in-memory sering penuh, itu sinyal bahwa antrean seharusnya durabel (database atau
 > message broker) — bukan alasan untuk menaikkan ukuran channel.
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
@@ -710,7 +710,7 @@ langsung bahwa server tidak mengirim rantai lengkap — dan itu bisa dilihat jus
 verifikasi dimatikan; dengan verifikasi aktif, koneksinya gagal sebelum sempat
 memperlihatkan apa pun."*
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
@@ -758,7 +758,7 @@ goroutine aktif tetap terbatas tanpa perlu channel semaphore manual. Perhatikan 
 tidak ada baris `path := path` — sejak Go 1.22 variable loop dibuat baru di setiap
 iterasi, jadi idiom lama itu tidak lagi dibutuhkan."*
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
@@ -770,7 +770,7 @@ Blok "Bug 1" berisi statement (`original := ...`, `fmt.Println(...)`) yang dilet
 **Perbaikan:** bungkus dalam `func main()`, atau gabungkan ke `func main()` yang sudah
 ada di blok yang sama.
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
@@ -808,7 +808,7 @@ Tambahkan satu kalimat bahwa InnoDB berperilaku berbeda: ia lebih sering menghas
 lock wait timeout atau deadlock, sehingga strategi retry untuk MariaDB perlu memeriksa
 kode error MySQL, bukan SQLSTATE PostgreSQL.
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
@@ -842,7 +842,7 @@ sebagai cara yang benar. Sekalian selaraskan gayanya: contohnya mencampur
 `atomic.StoreInt64(&hasil, ...)` gaya lama dengan `atomic.Bool` gaya baru — pakai
 `atomic.Int64` supaya konsisten.
 
-- [ ] Dikerjakan
+- [x] Dikerjakan
 
 ---
 
@@ -863,7 +863,7 @@ sebagai cara yang benar. Sekalian selaraskan gayanya: contohnya mencampur
 | B-8k | `80 Security/CSRF.md` | Tidak menyebut bahwa browser modern sudah memakai `SameSite=Lax` sebagai default untuk cookie tanpa atribut `SameSite`. | Tambahkan — ini mengubah gambaran risiko secara nyata, dan pembaca perlu tahu bahwa ia mungkin sudah terlindungi sebagian tanpa melakukan apa-apa (dan bahwa itu bukan alasan untuk tidak menyetelnya eksplisit). |
 | B-8l | `50 Concurrency and Performance/Benchmarking in Go.md` | Output benchmark (`600 ns/op`, `2400 ns/op`, "4x lebih cepat") ditampilkan seolah hasil pengukuran nyata. Melanggar `CLAUDE.md` §16.2. | Beri label eksplisit: *"Contoh bentuk output (angka di bawah ilustratif, bukan hasil pengukuran — jalankan sendiri untuk angka yang sesungguhnya)."* Ganti "sekitar 4x lebih cepat" jadi "jauh lebih cepat, dengan alokasi yang jauh lebih sedikit". |
 
-- [ ] Semua sub-item B-8 dikerjakan
+- [x] Semua sub-item B-8 dikerjakan
 
 ---
 

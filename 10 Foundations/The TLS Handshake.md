@@ -80,8 +80,11 @@ safeClient := &http.Client{
 
 // Untuk mendiagnosis masalah rantai sertifikat seperti di "The Problem",
 // periksa sertifikat yang benar-benar dikirim server:
+// inspectServerCertChain sengaja MEMATIKAN verifikasi — ini alat diagnosis,
+// dan tujuannya justru melihat rantai yang GAGAL diverifikasi. JANGAN pernah
+// menyalin tls.Config ini ke kode yang benar-benar mengirim atau menerima data.
 func inspectServerCertChain(ctx context.Context, addr string) error {
-    d := tls.Dialer{Config: &tls.Config{}}
+    d := tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}} // #nosec G402 — alat diagnosis
     conn, err := d.DialContext(ctx, "tcp", addr)
     if err != nil {
         return fmt.Errorf("tls dial %s: %w", addr, err)
@@ -100,7 +103,7 @@ func inspectServerCertChain(ctx context.Context, addr string) error {
 }
 ```
 
-`inspectServerCertChain` mencetak persis sertifikat apa saja yang dikirim server saat handshake — kalau hanya ada satu sertifikat (milik server itu sendiri) tanpa sertifikat intermediate yang menghubungkannya ke root CA, itu konfirmasi langsung bahwa server tidak mengirim rantai lengkap, yang menjelaskan kenapa `crypto/tls` menolaknya meski `curl` di beberapa environment tetap berhasil.
+`inspectServerCertChain` mencetak persis sertifikat apa saja yang dikirim server saat handshake — kalau hanya ada satu sertifikat (milik server itu sendiri) tanpa sertifikat intermediate yang menghubungkannya ke root CA, itu konfirmasi langsung bahwa server tidak mengirim rantai lengkap, yang menjelaskan kenapa `crypto/tls` menolaknya meski `curl` di beberapa environment tetap berhasil. Kalau function ini mencetak hanya satu sertifikat, itu konfirmasi langsung bahwa server tidak mengirim rantai lengkap — dan itu bisa dilihat justru karena verifikasi dimatikan; dengan verifikasi aktif, koneksinya gagal sebelum sempat memperlihatkan apa pun.
 
 ## In His Stack
 

@@ -85,6 +85,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // PastikanMinimalSatuDokterOnCall adalah operasi yang rentan write skew kalau
@@ -123,7 +125,7 @@ func jalankanDalamTransactionSerializable(ctx context.Context, db *sql.DB, dokte
 
 	var jumlahOnCallLain int
 	err = tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM dokter WHERE on_call = true AND id != ?`, dokterIDKeluar,
+		`SELECT COUNT(*) FROM dokter WHERE on_call = true AND id != $1`, dokterIDKeluar,
 	).Scan(&jumlahOnCallLain)
 	if err != nil {
 		return fmt.Errorf("hitung dokter on-call lain: %w", err)
@@ -133,20 +135,25 @@ func jalankanDalamTransactionSerializable(ctx context.Context, db *sql.DB, dokte
 		return fmt.Errorf("minimal satu dokter harus tetap on-call")
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE dokter SET on_call = false WHERE id = ?`, dokterIDKeluar); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE dokter SET on_call = false WHERE id = $1`, dokterIDKeluar); err != nil {
 		return fmt.Errorf("update status dokter: %w", err)
 	}
 
+	// pgconn.PgError membawa SQLSTATE. 40001 = serialization_failure,
+	// satu-satunya error yang boleh memicu retry di sini. Error lain
+	// (koneksi putus, constraint dilanggar) harus diteruskan apa adanya.
 	if err := tx.Commit(); err != nil {
-		// Driver database yang benar akan mengembalikan error spesifik
-		// (kode SQLSTATE 40001 di PostgreSQL) untuk konflik serialisasi —
-		// aplikasi produksi nyata harus memeriksa kode error itu secara
-		// eksplisit, bukan menganggap semua error commit sama.
-		return fmt.Errorf("%w: %v", errKonflikSerialisasi, err)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "40001" {
+			return fmt.Errorf("%w: %v", errKonflikSerialisasi, err)
+		}
+		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
 }
 ```
+
+Kode di atas memakai dialek dan SQLSTATE PostgreSQL. InnoDB (MySQL/MariaDB) berperilaku berbeda: ia lebih sering menghasilkan lock wait timeout atau deadlock daripada serialization failure saat commit, sehingga strategi retry untuk MariaDB perlu memeriksa kode error MySQL, bukan SQLSTATE PostgreSQL.
 
 ## In His Stack
 

@@ -117,7 +117,7 @@ Pakai **UDP** ketika data yang terlambat sama tidak bergunanya dengan data yang 
 
 ## Exercises
 
-1. Jelaskan dua jaminan yang diberikan TCP tapi tidak diberikan UDP.
+1. Jelaskan tiga jaminan yang diberikan TCP tapi tidak diberikan UDP.
 2. Kenapa `conn.Write` yang berhasil di UDP tidak membuktikan data benar-benar sampai ke penerima?
 3. Sebutkan satu skenario nyata di mana kehilangan sebagian data lewat UDP bisa diterima, dan satu skenario di mana itu tidak bisa diterima.
 4. Desain terbuka: sebuah sistem baru perlu menerima update lokasi GPS dari ratusan petugas pengantar dokumen legal setiap beberapa detik, sekaligus perlu menyimpan riwayat lengkap lokasi untuk keperluan audit pengantaran. Rancang pilihan protokol dan arsitektur pengirimannya — apakah UDP, TCP, atau kombinasi keduanya, dan bagaimana menyeimbangkan kebutuhan "update real-time yang murah" dengan "riwayat lengkap yang tidak boleh bolong" untuk keperluan audit.

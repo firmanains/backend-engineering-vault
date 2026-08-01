@@ -91,13 +91,10 @@ Versi production: kalau pekerjaannya sebenarnya bisa dilakukan in-process (bukan
 // goroutine aktif sekaligus dan mengumpulkan error pertama yang terjadi.
 func convertConcurrent(ctx context.Context, paths []string, maxWorkers int) error {
     g, ctx := errgroup.WithContext(ctx)
-    sem := make(chan struct{}, maxWorkers)
+    g.SetLimit(maxWorkers) // batasi goroutine aktif tanpa semaphore manual
 
     for _, path := range paths {
-        path := path // hindari capture variable loop yang salah
-        sem <- struct{}{}
         g.Go(func() error {
-            defer func() { <-sem }()
             if err := convertOneDocument(ctx, path); err != nil {
                 return fmt.Errorf("convert %s: %w", path, err)
             }
@@ -107,6 +104,8 @@ func convertConcurrent(ctx context.Context, paths []string, maxWorkers int) erro
     return g.Wait()
 }
 ```
+
+`g.SetLimit` menahan `g.Go` sampai ada slot kosong, jadi jumlah goroutine aktif tetap terbatas tanpa perlu channel semaphore manual. Perhatikan juga tidak ada baris `path := path` — sejak Go 1.22 variable loop dibuat baru di setiap iterasi, jadi idiom lama itu tidak lagi dibutuhkan.
 
 Yang berubah: `convertConcurrent` tidak membuat satu OS process baru per dokumen — semua goroutine berjalan di dalam satu process Go yang sama, berbagi heap yang sama, dijadwalkan runtime Go di atas OS thread yang jumlahnya jauh lebih sedikit dari jumlah goroutine. Biayanya jauh lebih murah, tapi sebagai gantinya kamu kehilangan isolasi: kalau `convertOneDocument` memicu panic yang tidak ditangkap, ia bisa mematikan seluruh process — beda dengan versi `os/exec` di mana satu `wkhtmltopdf` yang crash tidak akan mematikan binary Go-mu sendiri. `errgroup` dibahas lebih dalam di [[../50 Concurrency and Performance/errgroup|errgroup]].
 
