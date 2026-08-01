@@ -66,6 +66,7 @@ import (
 	"fmt"
 	"runtime"
 	"runtime/debug"
+	"time"
 )
 
 func main() {
@@ -73,7 +74,7 @@ func main() {
 	runtime.ReadMemStats(&m)
 	fmt.Printf("Heap yang dipakai: %d KB\n", m.HeapAlloc/1024)
 	fmt.Printf("Jumlah siklus GC sejak start: %d\n", m.NumGC)
-	fmt.Printf("Total waktu berhenti STW (semua siklus): %v\n", m.PauseTotalNs)
+	fmt.Printf("Total waktu berhenti STW (semua siklus): %v\n", time.Duration(m.PauseTotalNs))
 
 	// Menaikkan GOGC secara terprogram — GC berjalan lebih jarang,
 	// memori dibiarkan tumbuh lebih besar sebelum GC dipicu.

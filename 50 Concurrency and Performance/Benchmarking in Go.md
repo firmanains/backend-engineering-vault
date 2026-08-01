@@ -80,12 +80,13 @@ func BenchmarkGabungDenganBuilder(b *testing.B) {
 # alokasi memori (jumlah alokasi dan total byte per operasi).
 go test -bench=. -benchmem ./...
 
-# Output tipikal:
+# Contoh bentuk output (angka di bawah ilustratif, bukan hasil
+# pengukuran — jalankan sendiri untuk angka yang sesungguhnya):
 # BenchmarkGabungDenganPlus-8       500000    2400 ns/op    480 B/op    9 allocs/op
 # BenchmarkGabungDenganBuilder-8   2000000     600 ns/op     64 B/op    1 allocs/op
 ```
 
-Output ini memberi angka **konkret**: `GabungDenganBuilder` sekitar 4x lebih cepat (600ns vs 2400ns) dan mengalokasikan jauh lebih sedikit (1 alokasi vs 9 alokasi) — bukan lagi perdebatan intuisi, tapi data yang bisa langsung dipakai membuat keputusan.
+Output ini memberi angka **konkret**: `GabungDenganBuilder` jauh lebih cepat, dengan alokasi yang jauh lebih sedikit (1 alokasi vs 9 alokasi) — bukan lagi perdebatan intuisi, tapi data yang bisa langsung dipakai membuat keputusan.
 
 ## Under The Hood
 

@@ -102,7 +102,7 @@ Untuk melihat keputusan compiler secara langsung, jalankan:
 go build -gcflags="-m" ./...
 ```
 
-Compiler akan mencetak baris seperti `./main.go:12:9: &d escapes to heap` untuk `buatDokumenHeap`, dan tidak mencetak baris escape untuk `d` di `buatDokumenStack`. Ini bukan aturan yang harus dihafal satu-satu — ini alat untuk diperiksa saat kamu sudah tahu, lewat [[../50 Concurrency and Performance/pprof Profiling|pprof Profiling]], bahwa sebuah hot path memang menghabiskan waktu di alokasi.
+Compiler akan mencetak baris seperti `./main.go: &d escapes to heap` untuk `buatDokumenHeap` (posisi baris/kolom persisnya bergantung pada file pembaca sendiri). `buatDokumenStack` biasanya tidak memunculkan baris escape untuk `d` itu sendiri; perhatikan bahwa `fmt.Println` bisa memunculkan baris escape terpisah untuk argumennya — jalankan sendiri dan baca outputnya, jangan hafalkan hasilnya. Ini bukan aturan yang harus dihafal satu-satu — ini alat untuk diperiksa saat kamu sudah tahu, lewat [[../50 Concurrency and Performance/pprof Profiling|pprof Profiling]], bahwa sebuah hot path memang menghabiskan waktu di alokasi.
 
 ## In His Stack
 

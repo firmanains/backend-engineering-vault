@@ -45,11 +45,14 @@ func tulis() {
 }
 
 func baca() {
-	mu.Lock() // (C) — Lock ini "happens-after" Unlock (B) di atas
+	mu.Lock() // (C)
 	mu.Unlock()
-	println(hasil) // (D) — DIJAMIN melihat hasil = 42 dari (A),
-	               // KARENA ada rantai happens-before: A "sebelum" B,
-	               // B "sebelum" C (lewat mutex), C "sebelum" D
+	// (D) — melihat hasil = 42 HANYA JIKA Lock di (C) benar-benar terjadi
+	// SETELAH Unlock di (B). Kalau baca() kebetulan berjalan lebih dulu,
+	// tidak ada rantai happens-before sama sekali, dan ini tetap race.
+	// Mutex tidak menciptakan urutan antar goroutine — ia hanya MERAMBATKAN
+	// urutan yang memang sudah terjadi.
+	println(hasil)
 }
 ```
 
@@ -84,21 +87,25 @@ import "sync/atomic"
 // Flag menggunakan sync/atomic memberi jaminan happens-before yang
 // EKSPLISIT — berbeda dari variabel boolean biasa yang diakses tanpa
 // sinkronisasi sama sekali (yang TIDAK memberi jaminan apa pun).
-var hasil int64
+var hasil atomic.Int64
 var selesai atomic.Bool
 
 func tulisDenganAtomic() {
-	atomic.StoreInt64(&hasil, 42)
+	hasil.Store(42)
 	selesai.Store(true) // "happens-before" pembacaan Load yang melihat true
 }
 
+// bacaDenganAtomic dipakai di sini untuk mengilustrasikan memory model,
+// BUKAN pola produksi — busy-loop kosong ini membakar satu core CPU penuh
+// sambil menunggu. Kode produksi memakai channel atau sync.WaitGroup untuk
+// menunggu tanpa busy-waiting.
 func bacaDenganAtomic() {
 	for !selesai.Load() {
 		// menunggu sampai selesai == true
 	}
 	// DIJAMIN melihat hasil = 42 di sini, KARENA sync/atomic memberi
 	// jaminan happens-before yang setara dengan mutex untuk kasus ini.
-	println(atomic.LoadInt64(&hasil))
+	println(hasil.Load())
 }
 ```
 

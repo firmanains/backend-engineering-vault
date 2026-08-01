@@ -50,6 +50,8 @@ Diagram ini menunjukkan persis skenario "The Problem" — jeda tak terduga (GC p
 
 ## Under The Hood
 
+**Melepas lock juga berbahaya, bukan cuma memegangnya.** Skenario TTL habis yang sudah dibahas di atas punya kelanjutan yang sering terlewat: kalau instance A akhirnya "bangun" setelah TTL-nya habis dan lock-nya sudah diambil alih instance B, instance A yang mencoba membersihkan diri dengan memanggil `DEL` polos pada key lock itu akan menghapus lock **milik instance B**, bukan miliknya sendiri — key-nya sama, Redis tidak tahu siapa pemiliknya. Pelepasan lock karena itu harus **bersyarat**: bandingkan dulu nilai token yang tersimpan di lock dengan token yang dipegang instance yang mencoba melepas, dan hapus hanya kalau cocok. Di Redis, perbandingan-lalu-hapus ini harus dijalankan sebagai satu skrip Lua (`EVAL`) supaya atomik — kalau dipisah jadi `GET` lalu `DEL` dua perintah terpisah, ada celah waktu di antaranya yang membuka race condition yang sama persis dengan yang coba dicegah fencing token.
+
 **Fencing token** adalah mitigasi yang diakui luas untuk masalah ini — setiap kali lock diberikan, sertakan **nomor urut yang selalu naik** (fencing token) bersama lock itu. Instance yang memegang lock harus menyertakan fencing token ini setiap kali melakukan operasi yang dilindungi lock (misalnya menulis ke database), dan sistem yang menerima operasi itu (database, storage) harus **menolak** operasi dengan fencing token yang lebih rendah dari token terakhir yang sudah diterima — ini mencegah instance A yang "bangun terlambat" dari GC pause dan mencoba melanjutkan pekerjaannya (dengan token lama) dari benar-benar merusak data, karena sistem penerima akan menolak operasinya begitu melihat instance B sudah beroperasi dengan token yang lebih baru.
 
 **Kenapa `SETNX` sederhana di satu instance Redis tidak cukup untuk kasus yang benar-benar kritis**: bahkan tanpa masalah GC pause, satu instance Redis sendiri bisa gagal (crash, network partition) — kalau replikasi ke instance Redis lain belum sempat terjadi sebelum crash, lock yang "sudah diberikan" ke satu klien bisa hilang begitu Redis gagal-alih (failover) ke replica yang belum menerima informasi lock itu, membuka celah yang sama seperti skenario TTL habis. **Redlock** adalah algoritma yang diusulkan untuk mengatasi ini dengan meminta lock dari **mayoritas** node Redis independen — tapi algoritma ini sendiri menjadi bahan perdebatan signifikan di komunitas (termasuk kritik terkenal dari Martin Kleppmann yang mempertanyakan asumsi soal clock dan waktu yang dipakai Redlock) tentang apakah ia benar-benar memberi jaminan yang diklaim dalam semua kondisi kegagalan yang mungkin terjadi.
@@ -100,7 +102,10 @@ func PerolehLockDenganFencingToken(ctx context.Context, rdb *redis.Client, lockK
 // benar-benar mencegah kerusakan data, BUKAN sekadar mempercayai
 // pemegang lock "pasti" satu-satunya yang aktif.
 func TulisDenganFencingToken(ctx context.Context, tokenTerakhirTersimpan *int64, tokenBaru int64, data string) error {
-	if tokenBaru < *tokenTerakhirTersimpan {
+	// <=, bukan < — token yang SAMA persis dengan yang terakhir tersimpan
+	// berarti pemegang lock lama mencoba menulis lagi (misalnya request
+	// yang tertunda), dan itu justru kasus yang harus ditolak juga.
+	if tokenBaru <= *tokenTerakhirTersimpan {
 		return fmt.Errorf("fencing token %d sudah usang, token terakhir %d — operasi DITOLAK", tokenBaru, *tokenTerakhirTersimpan)
 	}
 	*tokenTerakhirTersimpan = tokenBaru

@@ -50,18 +50,18 @@ Diagram ini menunjukkan tiga keadaan: sub-slicing dan append yang masih muat ber
 Bug aliasing dari sub-slicing, dan bug append yang perilakunya bergantung kapasitas:
 
 ```go
-// Bug 1: aliasing lewat sub-slicing.
-original := []int{1, 2, 3, 4, 5}
-potongan := original[1:3] // [2, 3] — BERBAGI array yang sama dengan original
-potongan[0] = 99
-fmt.Println(original) // [1, 99, 3, 4, 5] — original ikut berubah!
-
 // Bug 2: append yang perilakunya bergantung kapasitas.
 func tambahMetadata(data []byte) []byte {
     return append(data, []byte("-METADATA")...)
 }
 
 func main() {
+    // Bug 1: aliasing lewat sub-slicing.
+    original := []int{1, 2, 3, 4, 5}
+    potongan := original[1:3] // [2, 3] — BERBAGI array yang sama dengan original
+    potongan[0] = 99
+    fmt.Println(original) // [1, 99, 3, 4, 5] — original ikut berubah!
+
     // Kasus A: slice dengan cap PAS-PAS SAMA dengan len — append memicu realokasi.
     a := make([]byte, 3, 3) // len=3, cap=3, TIDAK ada ruang cadangan
     copy(a, []byte("abc"))
