@@ -14,7 +14,9 @@ created: 2026-07-26
 
 ## TL;DR
 
-Sebuah **process** adalah unit eksekusi yang punya ruang memori sendiri, terisolasi dari process lain oleh sistem operasi. Sebuah **thread** adalah unit eksekusi di dalam satu process yang berbagi ruang memori itu dengan thread-thread lain di process yang sama, tapi tetap punya stack dan program counter sendiri. Goroutine di Go bukan salah satu dari keduanya secara murni — ia adalah unit concurrency yang dikelola runtime Go sendiri, dijadwalkan di atas sekumpulan kecil OS thread. Kesalahpahaman soal ini adalah sumber paling umum dari desain concurrency yang salah: mengira goroutine memberi isolasi seperti process, atau mengira spawn process murah seperti spawn goroutine.
+Sebuah **process** adalah **wadah**: ia memiliki ruang memori sendiri, file descriptor table sendiri, dan batas isolasi yang dijaga sistem operasi, tapi ia sendiri tidak mengeksekusi apa pun. Yang mengeksekusi adalah **thread**, unit yang dijadwalkan CPU dan punya program counter sendiri — itulah sebabnya setiap process wajib berisi minimal satu thread. Semua thread dalam satu process berbagi wadah yang sama (heap, file descriptor), meski masing-masing punya stack sendiri.
+
+**Goroutine** berada di kategori yang sama dengan thread, yaitu unit eksekusi, bukan wadah seperti process. Bedanya hanya pada siapa yang menjadwalkannya: thread dijadwalkan kernel, goroutine dijadwalkan runtime Go di atas sekumpulan kecil OS thread. Kesalahan kategori ini akar dari dua kesalahan desain yang umum: mengira goroutine memberi isolasi seperti process, atau mengira process semurah goroutine untuk dibuat. Isolasi adalah properti wadah, jadi goroutine yang bukan wadah tidak mewarisinya. Process baru juga jauh lebih mahal untuk dibuat daripada menambah satu unit eksekusi ke wadah yang sudah ada.
 
 ## The Problem
 
@@ -32,10 +34,12 @@ Analogi ini bocor di dua tempat. Pertama, membuat gedung baru (process baru) di 
 
 ## How It Works
 
-Sistem operasi mengelola dua level unit eksekusi:
+Sistem operasi mengelola dua hal yang sering disamakan padahal kategorinya berbeda:
 
-- **Process** — punya virtual address space sendiri (lihat [[Memory Layout - Stack vs Heap]]), file descriptor table sendiri (lihat [[Syscalls and File Descriptors]]), dan minimal satu thread. Process lain tidak bisa membaca memori process ini secara langsung — kalau mau berkomunikasi, mereka harus lewat mekanisme eksplisit seperti pipe, socket, atau shared memory yang sengaja dibuka.
-- **Thread** — unit yang benar-benar dijadwalkan CPU. Semua thread dalam satu process berbagi heap, kode program, dan file descriptor yang sama, tapi masing-masing thread punya stack sendiri dan register/program counter sendiri.
+- **Process — wadah, bukan pelaksana.** Ia memiliki virtual address space sendiri (lihat [[Memory Layout - Stack vs Heap]]) dan file descriptor table sendiri (lihat [[Syscalls and File Descriptors]]). Ia tidak dijadwalkan CPU dan tidak mengeksekusi instruksi apa pun; karena itulah ia harus berisi minimal satu thread. Process lain tidak bisa membaca memorinya secara langsung — komunikasi butuh mekanisme eksplisit seperti pipe, socket, atau shared memory.
+- **Thread — pelaksana.** Inilah yang dijadwalkan CPU dan benar-benar menjalankan kode. Semua thread dalam satu process memakai wadah yang sama (heap, kode program, file descriptor), tapi masing-masing punya stack dan program counter sendiri.
+
+Bedanya bisa diringkas jadi satu kalimat: **process menentukan apa yang bisa disentuh, thread menentukan apa yang sedang dikerjakan.**
 
 ```mermaid
 flowchart TB
@@ -87,13 +91,10 @@ Versi production: kalau pekerjaannya sebenarnya bisa dilakukan in-process (bukan
 // goroutine aktif sekaligus dan mengumpulkan error pertama yang terjadi.
 func convertConcurrent(ctx context.Context, paths []string, maxWorkers int) error {
     g, ctx := errgroup.WithContext(ctx)
-    sem := make(chan struct{}, maxWorkers)
+    g.SetLimit(maxWorkers) // batasi goroutine aktif tanpa semaphore manual
 
     for _, path := range paths {
-        path := path // hindari capture variable loop yang salah
-        sem <- struct{}{}
         g.Go(func() error {
-            defer func() { <-sem }()
             if err := convertOneDocument(ctx, path); err != nil {
                 return fmt.Errorf("convert %s: %w", path, err)
             }
@@ -103,6 +104,8 @@ func convertConcurrent(ctx context.Context, paths []string, maxWorkers int) erro
     return g.Wait()
 }
 ```
+
+`g.SetLimit` menahan `g.Go` sampai ada slot kosong, jadi jumlah goroutine aktif tetap terbatas tanpa perlu channel semaphore manual. Perhatikan juga tidak ada baris `path := path` — sejak Go 1.22 variable loop dibuat baru di setiap iterasi, jadi idiom lama itu tidak lagi dibutuhkan.
 
 Yang berubah: `convertConcurrent` tidak membuat satu OS process baru per dokumen — semua goroutine berjalan di dalam satu process Go yang sama, berbagi heap yang sama, dijadwalkan runtime Go di atas OS thread yang jumlahnya jauh lebih sedikit dari jumlah goroutine. Biayanya jauh lebih murah, tapi sebagai gantinya kamu kehilangan isolasi: kalau `convertOneDocument` memicu panic yang tidak ditangkap, ia bisa mematikan seluruh process — beda dengan versi `os/exec` di mana satu `wkhtmltopdf` yang crash tidak akan mematikan binary Go-mu sendiri. `errgroup` dibahas lebih dalam di [[../50 Concurrency and Performance/errgroup|errgroup]].
 

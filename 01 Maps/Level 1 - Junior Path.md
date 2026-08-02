@@ -18,7 +18,7 @@ Urutan domainnya sengaja bukan `10 → 20 → 30 ...` murni: `10 Foundations` da
 
 ## 1. 10 Foundations — cara mesin dan jaringan bekerja (12 note)
 
-1. Processes vs Threads — unit eksekusi paling dasar; kenapa satu proses bisa punya banyak thread dan apa bedanya secara memori.
+1. Processes vs Threads — beda antara **wadah** (process, yang memiliki memori) dan **pelaksana** (thread, yang dijadwalkan CPU), dan di kategori mana goroutine berada.
 2. Memory Layout - Stack vs Heap — kenapa Go memutuskan sebuah value hidup di stack atau heap, dan kenapa itu penting untuk performa.
 3. Blocking vs Non-Blocking IO — kenapa satu model I/O bisa membuat satu request menahan seluruh server.
 4. Syscalls and File Descriptors — apa yang sebenarnya terjadi saat kode memanggil `read()` atau membuka koneksi TCP.

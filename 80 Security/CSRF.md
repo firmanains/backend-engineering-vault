@@ -46,7 +46,7 @@ sequenceDiagram
 
 Diagram ini menunjukkan bahwa Sistem A tidak punya cara membedakan "request ini datang dari form asli Sistem A" versus "request ini datang dari form tersembunyi di situs B" — keduanya terlihat identik dari sisi Sistem A, karena keduanya membawa cookie session yang sama-sama valid.
 
-Pertahanan standar adalah **CSRF token**: nilai acak yang di-generate server dan disisipkan ke form asli Sistem A (biasanya sebagai hidden field), yang harus dikirim balik bersama request dan diverifikasi server. Situs jahat tidak bisa mengetahui nilai token ini (karena tidak bisa membaca halaman Sistem A akibat kebijakan *same-origin* browser), sehingga form palsu yang di-submit dari situs jahat tidak akan menyertakan token yang valid. Pertahanan kedua yang makin umum adalah atribut cookie `SameSite` — mengatur browser untuk **tidak** menyertakan cookie sama sekali pada request lintas-situs (cross-site), menutup celah ini langsung di level browser tanpa perlu token tambahan untuk banyak kasus.
+Pertahanan standar adalah **CSRF token**: nilai acak yang di-generate server dan disisipkan ke form asli Sistem A (biasanya sebagai hidden field), yang harus dikirim balik bersama request dan diverifikasi server. Situs jahat tidak bisa mengetahui nilai token ini (karena tidak bisa membaca halaman Sistem A akibat kebijakan *same-origin* browser), sehingga form palsu yang di-submit dari situs jahat tidak akan menyertakan token yang valid. Pertahanan kedua yang makin umum adalah atribut cookie `SameSite` — mengatur browser untuk **tidak** menyertakan cookie sama sekali pada request lintas-situs (cross-site), menutup celah ini langsung di level browser tanpa perlu token tambahan untuk banyak kasus. Browser modern bahkan sudah memakai `SameSite=Lax` sebagai default untuk cookie yang tidak menyertakan atribut `SameSite` sama sekali — artinya sebagian sistem sudah terlindungi sebagian tanpa melakukan apa-apa, tapi itu bukan alasan untuk tidak menyetelnya secara eksplisit, karena default itu bisa berubah antar browser dan tidak semua browser lama mengikutinya.
 
 ## In Go
 
@@ -83,7 +83,15 @@ func MiddlewareCSRF(ambilTokenSession func(ctx context.Context) string, next htt
 			return
 		}
 
+		// Form HTML biasa tidak bisa mengirim header kustom, jadi token juga
+		// diterima lewat form field — header tetap dicoba lebih dulu karena
+		// keharusan menyetel header kustom itu sendiri adalah pertahanan:
+		// browser melarang situs lain menyetel header kustom lintas origin
+		// tanpa preflight CORS yang mengizinkannya secara eksplisit.
 		tokenDikirim := r.Header.Get("X-CSRF-Token")
+		if tokenDikirim == "" {
+			tokenDikirim = r.FormValue("csrf_token")
+		}
 		tokenSeharusnya := ambilTokenSession(r.Context())
 
 		// subtle.ConstantTimeCompare mencegah timing attack saat

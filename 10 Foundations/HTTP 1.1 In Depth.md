@@ -40,7 +40,7 @@ Connection: keep-alive
 
 HTTP/1.1 200 OK
 Content-Type: application/json
-Content-Length: 128
+Content-Length: 42
 Connection: keep-alive
 
 {"id": "12345", "status": "terverifikasi"}

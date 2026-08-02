@@ -46,6 +46,13 @@ Saat login, sistem tidak "mendekripsi" hash untuk mendapatkan password asli (has
 
 ## In Go
 
+Contoh di bawah memakai cost factor 12 sebagai titik awal yang wajar per pertengahan 2020-an. Nilai ini harus dievaluasi ulang seiring waktu — makin cepat hardware tersedia, makin tinggi cost yang dibutuhkan supaya waktu komputasi tetap terasa mahal bagi penyerang.
+
+> [!question] Perlu diverifikasi
+> Klaim: cost factor 12 adalah nilai wajar untuk saat ini.
+> Kenapa ragu: rekomendasi work factor bergeser seiring waktu dan kapasitas hardware; angka spesifik gampang basi.
+> Cara verifikasi: cek rekomendasi terbaru di OWASP Password Storage Cheat Sheet.
+
 ```go
 package auth
 
@@ -55,15 +62,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// HashPassword menghasilkan hash bcrypt dari password mentah. Cost 12 adalah
-// titik awal yang wajar per pertengahan 2020-an — nilai ini harus dievaluasi
-// ulang seiring waktu; makin cepat hardware tersedia, makin tinggi cost yang
-// dibutuhkan supaya waktu komputasi tetap terasa "mahal" bagi penyerang.
-//
-// > [!question] Perlu diverifikasi
-// > Klaim: cost factor 12 adalah nilai wajar untuk saat ini.
-// > Kenapa ragu: rekomendasi work factor bergeser seiring waktu dan kapasitas hardware; angka spesifik gampang basi.
-// > Cara verifikasi: cek rekomendasi terbaru di OWASP Password Storage Cheat Sheet.
+// HashPassword menghasilkan hash bcrypt dari password mentah.
 func HashPassword(passwordMentah string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(passwordMentah), 12)
 	if err != nil {
@@ -188,6 +187,9 @@ Kelambatan yang jadi tujuan bcrypt/argon2 berarti hashing password **memang** me
 
 > [!warning] Jebakan
 > Membandingkan hash dengan operator `==` biasa alih-alih constant-time comparison — meski perbedaan waktunya kecil, celah timing attack tetap secara teoretis bisa dieksploitasi, dan library seperti `bcrypt.CompareHashAndPassword` di Go sudah menangani ini secara internal sehingga tidak perlu (dan tidak boleh) diimplementasikan ulang secara manual dengan cara yang naif.
+
+> [!warning] Jebakan
+> Melupakan bahwa bcrypt memotong password di **72 byte**. Password yang lebih panjang dipangkas diam-diam — dua passphrase berbeda yang 72 byte pertamanya identik akan sama-sama lolos verifikasi, tanpa error apa pun di mana pun. Kalau sistemmu mendorong pemakaian passphrase panjang, ini alasan konkret memilih argon2id yang tidak punya batas semacam itu. Kalau tetap memakai bcrypt, batasi panjang password di sisi validasi input supaya batasnya terlihat dan disengaja, bukan tersembunyi.
 
 ## Exercises
 
