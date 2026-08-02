@@ -54,6 +54,8 @@ Diagram ini menunjukkan inti MVCC: `Transaction 2` tidak pernah menimpa Versi A 
 
 ## Under The Hood
 
+Di PostgreSQL, snapshot diambil saat statement **pertama** dijalankan, bukan saat `BEGIN`. Membuka transaction lalu menunggu sebelum query pertama berarti snapshot-nya diambil di waktu yang lebih akhir dari yang mungkin kamu kira — hal yang perlu diperhatikan kalau titik waktu snapshot itu penting secara bisnis.
+
 Konsekuensi paling praktis dari perbedaan implementasi ini: **transaction PostgreSQL yang berjalan lama** (long-running transaction) sambil banyak `UPDATE` terjadi di tabel yang sama menyebabkan banyak dead tuple menumpuk **karena** `VACUUM` tidak bisa membersihkan versi apa pun yang mungkin masih dibutuhkan transaction tua itu — dikenal sebagai masalah *table bloat*, di mana ukuran fisik tabel membengkak jauh melebihi data yang sebenarnya aktif. **Transaction InnoDB yang berjalan lama**, sebaliknya, menyebabkan undo log terus membengkak karena harus mempertahankan cukup banyak riwayat perubahan untuk merekonstruksi versi lama yang mungkin masih dibutuhkan — keduanya sama-sama bermasalah, hanya termanifestasi di tempat fisik yang berbeda (tabel utama vs undo log), dan keduanya adalah alasan konkret kenapa transaction yang dibiarkan terbuka lama (misalnya lupa `COMMIT`/`ROLLBACK`, atau menahan transaction untuk operasi yang tidak perlu) adalah masalah operasional nyata, bukan sekadar gaya penulisan kode yang kurang rapi.
 
 Pemeriksaan write-write conflict (dua transaction sama-sama mencoba `UPDATE` baris yang sama) tetap butuh mekanisme lain di luar MVCC murni — MVCC menyelesaikan masalah **read** yang tidak memblokir **write** dan sebaliknya, tapi dua **write** terhadap baris yang sama tetap harus diselesaikan lewat locking (baris yang sedang di-`UPDATE` satu transaction akan memblokir `UPDATE` lain terhadap baris yang sama sampai transaction pertama selesai) — dibahas lebih dalam di [[Locking and Row Locks]].
@@ -71,9 +73,9 @@ import (
 
 // HitungTotalSaldoSnapshot memanfaatkan MVCC secara implisit: dengan
 // membuka satu transaction REPEATABLE READ, seluruh SELECT di dalamnya
-// melihat snapshot yang konsisten sejak transaction dimulai — TANPA
-// mengunci tabel rekening sama sekali, meski transaksi lain terus mengubah
-// saldo di latar belakang selama laporan ini berjalan.
+// melihat snapshot yang konsisten sejak query pertama di dalam transaction
+// dijalankan — TANPA mengunci tabel rekening sama sekali, meski transaksi
+// lain terus mengubah saldo di latar belakang selama laporan ini berjalan.
 func HitungTotalSaldoSnapshot(ctx context.Context, db *sql.DB) (int64, error) {
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,

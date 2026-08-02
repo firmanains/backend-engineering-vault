@@ -24,29 +24,38 @@ Kalau isolation level terlalu longgar, laporan bisa membaca saldo rekening tujua
 
 ## Intuition
 
-Bayangkan isolation level seperti **aturan seberapa banyak kamu boleh mengintip pekerjaan orang lain yang belum selesai**, di ruang kerja bersama. Level paling longgar seperti "boleh membaca coretan siapa pun di meja mereka, bahkan yang masih dicoret-coret dan belum final" (`READ UNCOMMITTED`) — cepat, tapi kamu bisa membaca sesuatu yang kemudian dihapus/diubah sebelum orang itu selesai. Level yang lebih ketat seperti "hanya boleh membaca dokumen yang sudah ditandatangani final" (`READ COMMITTED`) — lebih aman, tapi dokumen yang sama bisa saja **berubah** kalau kamu membacanya dua kali dalam sesi kerjamu, karena orang lain sempat menandatangani revisi baru di antaranya. Level paling ketat seperti "seluruh ruang kerja dibekukan sejak kamu mulai bekerja — apa pun yang kamu baca dijamin sama persis meski kamu baca berkali-kali" (`SERIALIZABLE`).
+Bayangkan isolation level seperti **aturan seberapa banyak kamu boleh mengintip pekerjaan orang lain yang belum selesai**, di ruang kerja bersama. Level paling longgar seperti "boleh membaca coretan siapa pun di meja mereka, bahkan yang masih dicoret-coret dan belum final" (`READ UNCOMMITTED`) — cepat, tapi kamu bisa membaca sesuatu yang kemudian dihapus/diubah sebelum orang itu selesai. Level yang lebih ketat seperti "hanya boleh membaca dokumen yang sudah ditandatangani final" (`READ COMMITTED`) — lebih aman, tapi dokumen yang sama bisa saja **berubah** kalau kamu membacanya dua kali dalam sesi kerjamu, karena orang lain sempat menandatangani revisi baru di antaranya. Level paling ketat (`SERIALIZABLE`) lebih mirip **diberi satu salinan cetak dari seluruh ruang kerja, tepat pada saat kamu mulai bekerja** — orang lain terus mengubah papan aslinya, tapi salinanmu tidak ikut berubah, jadi apa pun yang kamu baca berkali-kali selalu sama. Saat kamu menyerahkan hasil kerjamu, ada petugas yang memeriksa apakah perubahan orang lain sementara itu membuat pekerjaanmu jadi tidak konsisten; kalau ya, kamu diminta mengulang dengan salinan yang baru.
 
-Analogi ini bocor pada satu hal: "membekukan seluruh ruang kerja" di dunia nyata jelas tidak praktis untuk banyak orang bekerja bersamaan — tapi database **benar-benar bisa** mengimplementasikan efek serupa tanpa benar-benar membekukan semuanya secara fisik, lewat mekanisme seperti [[MVCC]] (Multi-Version Concurrency Control, level intermediate) yang menyimpan beberapa versi data sekaligus. Jadi isolasi ketat di database bukan berarti "semua orang lain berhenti bekerja" — itu berarti "kamu diberi tampilan yang konsisten, meski orang lain terus bekerja di baliknya."
+Analogi ini bocor pada **biaya salinannya**: database tidak benar-benar menyalin seluruh tabel untuk setiap transaction. Ia hanya menyimpan versi lama dari baris yang memang berubah, dan menyusun "salinan"-mu dari situ saat dibutuhkan — mekanismenya dibahas di [[MVCC]].
 
 ## How It Works
 
 Empat isolation level standar SQL, dari paling longgar ke paling ketat:
 
-| Level | Mengizinkan | Biaya relatif |
-|---|---|---|
-| `READ UNCOMMITTED` | Bisa membaca data yang belum di-`COMMIT` transaction lain ("dirty read") | Paling murah, paling jarang dipakai serius |
-| `READ COMMITTED` | Hanya membaca data yang sudah di-`COMMIT`, tapi nilai bisa berubah antar baca dalam transaction yang sama | Default PostgreSQL |
-| `REPEATABLE READ` | Nilai yang sudah dibaca tetap sama sepanjang transaction, tapi baris **baru** yang cocok kondisi bisa muncul ("phantom read") | Default MySQL/MariaDB (InnoDB) |
-| `SERIALIZABLE` | Transaction berjalan seolah-olah dieksekusi satu per satu secara berurutan, tanpa tumpang tindih sama sekali | Paling ketat, paling mahal |
+| Level | Mengizinkan | Biaya relatif | Default di mesin |
+|---|---|---|---|
+| `READ UNCOMMITTED` | Bisa membaca data yang belum di-`COMMIT` transaction lain ("dirty read") | Paling murah, paling jarang dipakai serius | — |
+| `READ COMMITTED` | Hanya membaca data yang sudah di-`COMMIT`, tapi nilai bisa berubah antar baca dalam transaction yang sama | Lebih murah dari `REPEATABLE READ` | PostgreSQL |
+| `REPEATABLE READ` | Nilai yang sudah dibaca tetap sama sepanjang transaction, tapi baris **baru** yang cocok kondisi bisa muncul ("phantom read") | Lebih mahal dari `READ COMMITTED` | MySQL/MariaDB (InnoDB) |
+| `SERIALIZABLE` | Transaction berjalan seolah-olah dieksekusi satu per satu secara berurutan, tanpa tumpang tindih sama sekali | Paling ketat, paling mahal | — |
 
 Pembahasan detail anomali (dirty read, non-repeatable read, phantom read, write skew) dan trade-off performa masing-masing level ada di [[Isolation Levels and Their Anomalies]], level intermediate — note ini fokus pada gambaran besar yang wajib dipahami lebih dulu.
 
 ```sql
--- Mengatur isolation level untuk satu transaction
-START TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+-- PostgreSQL
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+-- ... operasi transaction ...
+COMMIT;
+
+-- MySQL / MariaDB — isolation level diset SEBELUM transaction dimulai,
+-- tidak bisa digabung ke dalam satu statement START TRANSACTION.
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION;
 -- ... operasi transaction ...
 COMMIT;
 ```
+
+Perbedaan sintaks sekecil ini adalah contoh konkret kenapa menyetel isolation level lewat `sql.TxOptions` di Go lebih aman daripada menuliskannya sebagai SQL mentah — driver yang menerjemahkannya ke dialek yang benar.
 
 Poin paling praktis untuk diingat sekarang: **default berbeda antar mesin database**. Kode yang ditulis dan diuji terhadap MariaDB (default `REPEATABLE READ`) mengandalkan jaminan yang tidak otomatis berlaku kalau dijalankan terhadap PostgreSQL tanpa konfigurasi eksplisit (default `READ COMMITTED`, lebih longgar) — dan sebaliknya.
 

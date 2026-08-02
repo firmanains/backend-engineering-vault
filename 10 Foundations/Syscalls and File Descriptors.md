@@ -48,7 +48,7 @@ Diagram ini menunjukkan bahwa file descriptor hanyalah nomor referensi — resou
 
 ## In Go
 
-Setiap `os.File`, `net.Conn`, `http.Response.Body`, dan `sql.Rows` di Go membungkus satu file descriptor. Semuanya wajib ditutup secara eksplisit — garbage collector Go **tidak menjanjikan** penutupan tepat waktu, karena GC berjalan berdasarkan tekanan memori, bukan berdasarkan jumlah file descriptor yang terpakai.
+Setiap `os.File`, `net.Conn`, dan `http.Response.Body` di Go membungkus satu file descriptor. `sql.Rows` menahan satu koneksi dari pool selama belum ditutup, dan koneksi itulah yang memegang file descriptor — efek praktisnya sama: `rows` yang lupa ditutup menahan resource. Semuanya wajib ditutup secara eksplisit — garbage collector Go **tidak menjanjikan** penutupan tepat waktu, karena GC berjalan berdasarkan tekanan memori, bukan berdasarkan jumlah file descriptor yang terpakai.
 
 ```go
 // Naif: response body tidak selalu ditutup — kalau io.ReadAll gagal,
@@ -111,7 +111,7 @@ Ini bukan topik yang punya "kapan tidak dipakai" seperti pola desain — syscall
 > Lupa memanggil `Close()` di jalur error yang jarang terjadi. Pola paling aman adalah selalu memakai `defer resp.Body.Close()` (atau `rows.Close()`, `file.Close()`) **segera setelah** resource berhasil dibuka, bukan di akhir function setelah semua pemrosesan.
 
 > [!warning] Jebakan
-> Berasumsi garbage collector Go akan menutup file descriptor yang lupa ditutup, karena "kan ada GC". GC Go memang punya finalizer sebagai jaring pengaman terakhir, tapi finalizer berjalan berdasarkan tekanan memori dan waktunya tidak bisa diprediksi — pada saat itu terpicu, file descriptor mungkin sudah bocor cukup lama untuk menyebabkan masalah.
+> Berasumsi garbage collector Go akan menutup file descriptor yang lupa ditutup, karena "kan ada GC". `os.File` dan `net.Conn` memang punya finalizer sebagai jaring pengaman terakhir, tapi finalizer berjalan berdasarkan tekanan memori dan waktunya tidak bisa diprediksi — pada saat itu terpicu, file descriptor mungkin sudah bocor cukup lama untuk menyebabkan masalah. `http.Response.Body` **tidak** punya jaring pengaman semacam itu sama sekali — justru kasus paling umum di note ini adalah yang paling tidak terlindungi kalau lupa ditutup.
 
 > [!warning] Jebakan
 > Menaikkan `ulimit -n` sebagai solusi pertama begitu melihat error `too many open files`, tanpa memeriksa dulu apakah ada kebocoran resource yang sebenarnya. Menaikkan limit menunda gejala, bukan menghilangkan bug — kebocoran yang sama akan kembali muncul di volume yang lebih tinggi.

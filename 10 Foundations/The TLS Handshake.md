@@ -37,15 +37,15 @@ sequenceDiagram
     participant C as Client
     participant S as Server
 
-    C->>S: ClientHello (cipher suite yang didukung, versi TLS)
-    S->>C: ServerHello + Sertifikat + kunci publik sementara
-    Note over C: Verifikasi sertifikat terhadap trust store lokal
-    C->>S: Selesaikan pertukaran kunci, mulai turunkan kunci sesi
-    Note over C,S: Kedua sisi kini punya kunci sesi bersama
-    S->>C: Finished (terenkripsi)
+    C->>S: ClientHello (cipher suite, versi, key share)
+    Note over S: Server sudah bisa menurunkan kunci sesi di sini
+    S->>C: ServerHello + key share + Sertifikat +<br/>CertificateVerify + Finished (sebagian terenkripsi)
+    Note over C: Verifikasi rantai sertifikat terhadap trust store lokal
     C->>S: Finished (terenkripsi)
-    Note over C,S: Data aplikasi (HTTP, dll) mulai mengalir, terenkripsi
+    Note over C,S: Data aplikasi mulai mengalir — 1 round-trip sejak ClientHello
 ```
+
+Perhatikan bahwa client sudah mengirim key share-nya di `ClientHello`, dan server membalas seluruh sisanya dalam satu kiriman. Inilah alasan mekanis kenapa TLS 1.3 butuh lebih sedikit round-trip dibanding TLS 1.2, yang mengharuskan pertukaran kunci berlangsung dalam kiriman terpisah setelah sertifikat diterima.
 
 Poin penting: verifikasi sertifikat bukan sekadar "apakah sertifikatnya valid", tapi apakah **rantai kepercayaan lengkap** dari sertifikat server sampai ke root CA yang ada di trust store klien bisa dibuktikan. Kalau server hanya mengirim sertifikatnya sendiri tanpa sertifikat intermediate yang menghubungkannya ke root CA, klien yang ketat (seperti `crypto/tls` Go secara default) akan menolak koneksi — inilah akar masalah di skenario "The Problem" di atas.
 
@@ -80,8 +80,11 @@ safeClient := &http.Client{
 
 // Untuk mendiagnosis masalah rantai sertifikat seperti di "The Problem",
 // periksa sertifikat yang benar-benar dikirim server:
+// inspectServerCertChain sengaja MEMATIKAN verifikasi — ini alat diagnosis,
+// dan tujuannya justru melihat rantai yang GAGAL diverifikasi. JANGAN pernah
+// menyalin tls.Config ini ke kode yang benar-benar mengirim atau menerima data.
 func inspectServerCertChain(ctx context.Context, addr string) error {
-    d := tls.Dialer{Config: &tls.Config{}}
+    d := tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}} // #nosec G402 — alat diagnosis
     conn, err := d.DialContext(ctx, "tcp", addr)
     if err != nil {
         return fmt.Errorf("tls dial %s: %w", addr, err)
@@ -100,7 +103,7 @@ func inspectServerCertChain(ctx context.Context, addr string) error {
 }
 ```
 
-`inspectServerCertChain` mencetak persis sertifikat apa saja yang dikirim server saat handshake — kalau hanya ada satu sertifikat (milik server itu sendiri) tanpa sertifikat intermediate yang menghubungkannya ke root CA, itu konfirmasi langsung bahwa server tidak mengirim rantai lengkap, yang menjelaskan kenapa `crypto/tls` menolaknya meski `curl` di beberapa environment tetap berhasil.
+`inspectServerCertChain` mencetak persis sertifikat apa saja yang dikirim server saat handshake — kalau hanya ada satu sertifikat (milik server itu sendiri) tanpa sertifikat intermediate yang menghubungkannya ke root CA, itu konfirmasi langsung bahwa server tidak mengirim rantai lengkap, yang menjelaskan kenapa `crypto/tls` menolaknya meski `curl` di beberapa environment tetap berhasil. Kalau function ini mencetak hanya satu sertifikat, itu konfirmasi langsung bahwa server tidak mengirim rantai lengkap — dan itu bisa dilihat justru karena verifikasi dimatikan; dengan verifikasi aktif, koneksinya gagal sebelum sempat memperlihatkan apa pun.
 
 ## In His Stack
 

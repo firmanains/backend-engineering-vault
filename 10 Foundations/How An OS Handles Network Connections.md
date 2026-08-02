@@ -14,19 +14,19 @@ created: 2026-07-26
 
 ## TL;DR
 
-Dari sebuah packet yang tiba di network card sampai byte yang bisa dibaca aplikasimu lewat `conn.Read()`, ada beberapa lapisan yang dilewati: NIC menerima frame, kernel memprosesnya naik lewat network stack (IP lalu TCP), mencocokkannya ke socket yang sedang `listen` di port tertentu, menyelesaikan handshake, lalu menaruh koneksi yang sudah "matang" itu ke sebuah antrean (**accept queue**) yang dipegang socket tersebut. Aplikasimu baru menyentuh koneksi itu ketika ia memanggil `accept()` — mengambil satu koneksi dari antrean dan mendapat file descriptor baru untuknya. Kalau antrean ini terlalu kecil untuk menampung lonjakan koneksi, koneksi baru bisa ditolak atau di-reset **sebelum aplikasimu sempat tahu ada yang mencoba terhubung** — gejala yang sering disalahartikan sebagai bug aplikasi, padahal murni soal konfigurasi di lapisan OS.
+Dari sebuah packet yang tiba di network card sampai byte yang bisa dibaca aplikasimu lewat `conn.Read()`, ada beberapa lapisan yang dilewati: NIC menerima frame, kernel memprosesnya naik lewat network stack (IP lalu TCP), mencocokkannya ke socket yang sedang `listen` di port tertentu, menyelesaikan handshake, lalu menaruh koneksi yang sudah "matang" itu ke sebuah antrean (**accept queue**) yang dipegang socket tersebut. Aplikasimu baru menyentuh koneksi itu ketika ia memanggil `accept()` — mengambil satu koneksi dari antrean dan mendapat file descriptor baru untuknya. Kalau antrean ini terlalu kecil untuk menampung lonjakan koneksi, koneksi baru bisa dibuang diam-diam **sebelum aplikasimu sempat tahu ada yang mencoba terhubung** — gejala yang sering disalahartikan sebagai bug aplikasi atau server yang lambat, padahal murni soal konfigurasi di lapisan OS.
 
 ## The Problem
 
-Bayangkan sebuah service Go di belakang Nginx tiba-tiba mulai menolak sebagian koneksi setiap kali ada lonjakan traffic mendadak — misalnya saat sebuah portal pemerintah membuka pendaftaran dan ribuan orang mengakses bersamaan dalam hitungan detik. CPU service itu tidak penuh, memori juga wajar, goroutine tidak menumpuk berlebihan — semua metrik aplikasi terlihat baik-baik saja. Tapi sebagian client tetap menerima `connection reset` sebelum request mereka bahkan sampai ke handler Go manapun.
+Bayangkan sebuah service Go di belakang Nginx tiba-tiba terasa lambat lalu timeout untuk sebagian request, setiap kali ada lonjakan traffic mendadak — misalnya saat sebuah portal pemerintah membuka pendaftaran dan ribuan orang mengakses bersamaan dalam hitungan detik. CPU service itu tidak penuh, memori juga wajar, goroutine tidak menumpuk berlebihan — semua metrik aplikasi terlihat baik-baik saja. Tim mencari query lambat atau handler berat, tapi tidak menemukan apa pun, karena sebagian request itu tidak pernah sampai ke handler Go manapun.
 
-Ini adalah gejala klasik dari **accept queue** (sering disebut juga *listen backlog*) yang kepenuhan. Kernel OS punya batas berapa banyak koneksi yang sudah selesai proses handshake-nya tapi belum diambil aplikasi lewat `accept()` yang boleh ditampung sekaligus. Kalau lonjakan koneksi datang lebih cepat dari kecepatan aplikasi memanggil `accept()`, antrean ini penuh, dan koneksi berikutnya ditolak di level kernel — jauh sebelum baris kode Go manapun sempat dieksekusi. Tanpa memahami lapisan ini, engineer akan menghabiskan waktu memeriksa kode aplikasi untuk bug yang sebenarnya tidak ada di sana.
+Ini adalah gejala klasik dari **accept queue** (sering disebut juga *listen backlog*) yang kepenuhan. Kernel OS punya batas berapa banyak koneksi yang sudah selesai proses handshake-nya tapi belum diambil aplikasi lewat `accept()` yang boleh ditampung sekaligus. Kalau lonjakan koneksi datang lebih cepat dari kecepatan aplikasi memanggil `accept()`, antrean ini penuh, dan koneksi berikutnya dibuang diam-diam di level kernel — jauh sebelum baris kode Go manapun sempat dieksekusi. Tanpa memahami lapisan ini, engineer akan menghabiskan waktu memeriksa kode aplikasi untuk bug yang sebenarnya tidak ada di sana, padahal gejalanya justru mengarah ke "server lambat", bukan "server menolak".
 
 ## Intuition
 
 Bayangkan sebuah **ruang penerimaan surat di gedung kantor**. Surat masuk (packet) diterima di loket depan (NIC), lalu disortir petugas berdasarkan alamat departemen tujuannya (IP dan port — ini kerja kernel network stack). Surat yang sudah lengkap alamatnya ditaruh di **nampan masuk** milik departemen itu (accept queue), menunggu staf departemen (aplikasimu, lewat `accept()`) mengambilnya satu per satu sesuai kecepatan mereka bekerja.
 
-Analogi ini bocor di satu titik penting: kalau nampan surat sungguhan penuh, surat baru biasanya tetap ditumpuk di lantai — tidak dikembalikan ke pengirim. Accept queue di kernel tidak sesabar itu: begitu penuh, percobaan koneksi baru bisa langsung **ditolak atau di-reset**, dan si pengirim (client) menerima error seketika, bukan menunggu dengan sabar sampai ada tempat kosong.
+Analogi ini bocor di satu titik penting: kalau nampan surat sungguhan penuh, surat baru biasanya tetap ditumpuk di lantai — tidak dikembalikan ke pengirim. Accept queue di kernel Linux (dengan setelan default) juga tidak mengembalikan apa pun ke pengirim: begitu penuh, **surat baru dibuang tanpa pemberitahuan, dan pengirim hanya tahu bahwa balasannya tak kunjung datang**.
 
 ## How It Works
 
@@ -36,7 +36,7 @@ Perjalanan sebuah koneksi TCP masuk, dari kabel sampai kode aplikasi:
 2. **Kernel network stack** memproses frame itu naik lewat lapisan-lapisan protokol (lihat [[The TCP-IP Model]]) — mengurai header IP untuk tahu tujuan, lalu header TCP untuk tahu port tujuan.
 3. Kernel mencocokkan port tujuan itu dengan **socket yang sedang `listen`** di port tersebut.
 4. Untuk koneksi TCP baru, kernel menyelesaikan proses handshake (lihat [[TCP Handshake and Connection Lifecycle]]) secara otomatis — ini terjadi **sebelum** aplikasi tahu apa-apa.
-5. Koneksi yang sudah selesai handshake-nya ditaruh di **accept queue** milik socket yang `listen` itu.
+5. Koneksi yang sudah selesai handshake-nya ditaruh di **accept queue** milik socket yang `listen` itu. Sebenarnya ada **dua** antrean, bukan satu: *SYN queue* menampung koneksi yang handshake-nya belum selesai, dan *accept queue* menampung yang sudah selesai tapi belum diambil `accept()` — keduanya punya batas sendiri dan bisa penuh sendiri-sendiri.
 6. Aplikasi memanggil syscall `accept()`, yang mengambil satu koneksi dari depan antrean dan mengembalikan **file descriptor baru** khusus untuk koneksi itu (lihat [[Syscalls and File Descriptors]]).
 7. Setelah itu, aplikasi membaca dan menulis pada file descriptor itu seperti biasa, mengikuti model blocking/non-blocking yang sudah dibahas di [[Blocking vs Non-Blocking IO]].
 
@@ -48,12 +48,14 @@ flowchart LR
     Match -->|"tidak ada yang listen"| Reset["Kernel kirim RST"]
     Queue --> Accept["Aplikasi memanggil accept()"]
     Accept --> FD["File descriptor baru\nuntuk koneksi ini"]
-    Queue -.->|"antrean penuh"| Drop["Koneksi baru ditolak/direset"]
+    Queue -.->|"antrean penuh"| Drop["SYN dibuang diam-diam\n(client mengalami timeout)"]
 ```
 
 Diagram ini menunjukkan titik krusial yang sering dilewatkan: kotak "Accept Queue" adalah tempat koneksi bisa gagal **tanpa** aplikasi pernah tahu — baik karena tidak ada socket yang listen di port itu, maupun karena antreannya sendiri sudah penuh.
 
 ## Under The Hood
+
+Apa yang persis terjadi saat accept queue penuh bergantung pada setelan kernel. Di Linux, perilaku default (`net.ipv4.tcp_abort_on_overflow = 0`) adalah **membuang paket SYN itu diam-diam**, bukan mengirim `RST`. Akibatnya client tidak melihat penolakan yang jelas — ia hanya "menunggu", mengirim ulang SYN-nya beberapa kali sesuai aturan retransmisi TCP, lalu akhirnya timeout. Gejala di sisi client karena itu terlihat seperti **server yang lambat**, bukan server yang menolak. Ini jebakan diagnosis yang serius: tim mencari query lambat atau handler berat, padahal request-nya belum pernah sampai ke aplikasi sama sekali. Metrik yang menjawab pertanyaan ini adalah penghitung overflow di `netstat -s` (baris yang menyebut *listen queue* atau *SYNs to LISTEN sockets dropped*), bukan metrik aplikasi mana pun.
 
 Ukuran accept queue ditentukan oleh dua angka yang harus sama-sama cukup besar: parameter `backlog` yang diberikan aplikasi saat memanggil `listen()` (di Go, ini diatur secara internal oleh `net.Listen`, biasanya lewat konfigurasi OS default), dan batas maksimum yang diizinkan kernel secara sistem-wide (di Linux, dikontrol lewat parameter kernel `net.core.somaxconn`). Nilai efektif yang benar-benar dipakai adalah nilai **terkecil** di antara keduanya — menaikkan satu tanpa menaikkan yang lain tidak akan membantu.
 
@@ -130,7 +132,7 @@ Tidak ada trade-off dalam arti "kapan tidak memakai mekanisme ini" — accept qu
 4. Desain terbuka: sebuah service pendaftaran online milik pemerintah mengalami lonjakan traffic tepat di menit pembukaan pendaftaran, dan sebagian besar user menerima error koneksi dalam beberapa detik pertama meski server tidak terlihat overload di CPU/memori setelahnya. Rancang strategi lengkap (dari level OS/listener sampai level aplikasi dan arsitektur) untuk menghadapi lonjakan seperti ini di pembukaan pendaftaran berikutnya.
 
 > [!success]- Kunci jawaban
-> Beberapa lapis mitigasi: (1) naikkan backlog di level Nginx dan (kalau relevan) `net.core.somaxconn` di kernel, berdasarkan estimasi lonjakan konkuren yang realistis, bukan angka default; (2) pastikan loop `Accept()` di aplikasi (atau konfigurasi worker di Nginx/PHP-FPM) tidak blocking dan segera menyerahkan koneksi baru ke goroutine/worker terpisah; (3) pertimbangkan **load shedding** yang sengaja (lihat [[../30 APIs and Web/Load Shedding|Load Shedding]]) — menolak sebagian request dengan respons yang jelas ("server sibuk, coba lagi") jauh lebih baik daripada koneksi yang di-reset tanpa penjelasan; (4) untuk lonjakan yang benar-benar bisa diprediksi (jam pembukaan pendaftaran), pertimbangkan **waiting room** di level aplikasi yang menahan user di antrean virtual sebelum mereka benar-benar membuka koneksi ke backend, memindahkan masalah dari "koneksi TCP yang ditolak kernel" menjadi "antrean yang terlihat dan terkendali di level aplikasi".
+> Beberapa lapis mitigasi: (1) naikkan backlog di level Nginx dan (kalau relevan) `net.core.somaxconn` di kernel, berdasarkan estimasi lonjakan konkuren yang realistis, bukan angka default; (2) pastikan loop `Accept()` di aplikasi (atau konfigurasi worker di Nginx/PHP-FPM) tidak blocking dan segera menyerahkan koneksi baru ke goroutine/worker terpisah; (3) pertimbangkan **load shedding** yang sengaja (lihat [[../30 APIs and Web/Load Shedding|Load Shedding]]) — menolak sebagian request dengan respons yang jelas ("server sibuk, coba lagi") jauh lebih baik daripada koneksi yang dibuang diam-diam tanpa penjelasan; (4) untuk lonjakan yang benar-benar bisa diprediksi (jam pembukaan pendaftaran), pertimbangkan **waiting room** di level aplikasi yang menahan user di antrean virtual sebelum mereka benar-benar membuka koneksi ke backend, memindahkan masalah dari "koneksi TCP yang ditolak kernel" menjadi "antrean yang terlihat dan terkendali di level aplikasi".
 
 ## Self-Check
 

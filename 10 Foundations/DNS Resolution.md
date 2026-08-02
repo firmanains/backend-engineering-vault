@@ -14,7 +14,7 @@ created: 2026-07-26
 
 ## TL;DR
 
-DNS mengubah nama domain yang bisa dibaca manusia (`api.partner.go.id`) menjadi alamat IP yang bisa dipakai jaringan, lewat proses pencarian berjenjang: resolver bertanya ke root server, root mengarahkan ke server TLD (misalnya `.id`), TLD mengarahkan ke authoritative nameserver domain itu, dan barulah IP sebenarnya didapat. Hasil pencarian ini dicache di banyak lapisan sekaligus — resolver OS, kadang di level aplikasi, dan secara tidak langsung di koneksi TCP yang sudah terbuka (yang tetap memakai IP lama sampai koneksi itu ditutup, apa pun perubahan DNS setelahnya). Memahami lapisan cache ini penting karena ia menjelaskan kenapa perubahan DNS di sisi partner tidak selalu langsung terasa di sisimu — kadang butuh restart atau penutupan koneksi lama sebelum perubahan itu benar-benar berlaku.
+DNS mengubah nama domain yang bisa dibaca manusia (`api.partner.go.id`) menjadi alamat IP yang bisa dipakai jaringan, lewat proses pencarian berjenjang: resolver bertanya ke root server, root mengarahkan ke server TLD (misalnya `.id`), TLD mengarahkan ke authoritative nameserver domain itu, dan barulah IP sebenarnya didapat. Hasil pencarian ini bisa dicache di beberapa lapisan — recursive resolver di hulu, kadang di level aplikasi, dan secara tidak langsung di koneksi TCP yang sudah terbuka (yang tetap memakai IP lama sampai koneksi itu ditutup, apa pun perubahan DNS setelahnya) — meski cache di mesin aplikasi itu sendiri sering kali tidak ada sama sekali, terutama di server Linux. Memahami lapisan cache ini penting karena ia menjelaskan kenapa perubahan DNS di sisi partner tidak selalu langsung terasa di sisimu — kadang butuh restart atau penutupan koneksi lama sebelum perubahan itu benar-benar berlaku.
 
 ## The Problem
 
@@ -26,7 +26,7 @@ Penyebabnya sering ada di lapisan yang tidak terlihat: kalau service-mu memakai 
 
 Bayangkan DNS seperti **bertanya alamat lewat rantai informasi berjenjang**: kamu tidak langsung tahu alamat rumah seseorang, jadi kamu bertanya ke kantor kelurahan pusat (root server) "siapa yang mengurus wilayah `.id`?", diarahkan ke kantor wilayah itu (TLD server), lalu diarahkan lagi ke kantor yang benar-benar tahu detail alamat domain spesifik itu (authoritative nameserver), yang akhirnya memberimu alamat sesungguhnya (IP). Karena bertanya berjenjang seperti ini lambat kalau dilakukan setiap kali, kamu mencatat alamat itu di buku catatanmu sendiri untuk sementara (cache, dengan masa berlaku TTL) supaya tidak perlu bertanya ulang setiap saat.
 
-Analogi ini bocor di jumlah "buku catatan" yang sebenarnya ada. Bukan cuma satu cache — ada cache di level resolver OS, kadang cache tambahan di level aplikasi atau container runtime, dan yang sering terlupakan: koneksi TCP yang sudah terbuka pada dasarnya "mengunci" alamat yang di-resolve saat koneksi itu dibuat, terlepas dari TTL DNS yang sebenarnya sudah kedaluwarsa. Buku catatan sungguhan tidak berlapis-lapis seperti ini.
+Analogi ini bocor di jumlah "buku catatan" yang sebenarnya ada, dan di mana buku catatan itu betul-betul berada. Bukan cuma satu cache — ada cache di recursive resolver hulu (bukan selalu di mesin aplikasi itu sendiri, terutama di server Linux), kadang cache tambahan di level aplikasi atau container runtime, dan yang sering terlupakan: koneksi TCP yang sudah terbuka pada dasarnya "mengunci" alamat yang di-resolve saat koneksi itu dibuat, terlepas dari TTL DNS yang sebenarnya sudah kedaluwarsa. Buku catatan sungguhan tidak berlapis-lapis seperti ini.
 
 ## How It Works
 
@@ -51,7 +51,9 @@ sequenceDiagram
     Note over R: hasil ini di-cache sampai TTL habis
 ```
 
-Di praktiknya, resolver di sistem operasi biasanya sudah punya banyak jawaban tercache dari query sebelumnya, jadi rantai penuh ini jarang benar-benar dilalui setiap kali. **TTL** (time-to-live) yang disertakan authoritative nameserver menentukan berapa lama hasil ini boleh dianggap valid sebelum ditanyakan ulang — TTL pendek berarti perubahan IP terasa lebih cepat tapi lebih sering membebani nameserver dengan query; TTL panjang sebaliknya.
+Di laptop desktop, resolver lokal biasanya memang melakukan cache. **Di server Linux, sering kali tidak ada cache lokal sama sekali** — glibc tidak melakukan cache DNS, dan resolver murni-Go yang dipakai `net.Resolver` juga tidak. Yang melakukan cache biasanya adalah recursive resolver di hulu (DNS milik cloud provider, atau CoreDNS di dalam cluster Kubernetes). Konsekuensi praktisnya: saat mendiagnosis "kenapa perubahan DNS partner belum terasa", tempat yang perlu diperiksa adalah resolver hulu dan **connection pool aplikasimu sendiri** — bukan cache di mesin aplikasi yang mungkin memang tidak pernah ada.
+
+**TTL** (time-to-live) yang disertakan authoritative nameserver menentukan berapa lama hasil ini boleh dianggap valid sebelum ditanyakan ulang di lapisan mana pun yang melakukan cache — TTL pendek berarti perubahan IP terasa lebih cepat tapi lebih sering membebani nameserver dengan query; TTL panjang sebaliknya.
 
 Yang perlu diingat: begitu aplikasimu **membuka koneksi TCP** ke IP hasil resolusi ini, koneksi itu tidak lagi peduli pada DNS sama sekali sampai koneksi itu ditutup — DNS hanya relevan di momen koneksi *baru* dibuka, bukan sepanjang hidup koneksi yang sudah ada.
 
