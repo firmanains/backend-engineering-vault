@@ -55,12 +55,11 @@ Ditulis setiap kali sesi penulisan berhenti di tengah jalan, supaya sesi berikut
 - **Item follow-up yang diketahui (belum dikerjakan)**: §10 CLAUDE.md mensyaratkan **setiap** concept note yang ditautkan sebuah case study balik menautkan case study itu di "Connected Notes"-nya — link balik ini belum ditambahkan ke ~60-70 concept note yang ditautkan 25 case study di atas (case study sendiri sudah menautkan concept note dengan benar, arahnya baru satu sisi). Ini murni pekerjaan mekanis (edit "Connected Notes" tiap concept note terkait), bukan gap konten, dan sebaiknya dikerjakan sebagai satu pass tersendiri sebelum vault benar-benar dianggap selesai.
 
 - **`95 Projects` selesai penuh (3/3 note, plus `_Overview.md` baru dibuat untuk folder ini)**: Project 1 (junior, REST API terautentikasi), Project 2 (intermediate, worker pool/cache/Kafka), Project 3 (senior, sistem terdistribusi tiga service dengan saga/outbox/idempotency/chaos/ADR).
+- **`99 Glossary` selesai penuh (20/20 note)**: `Term - Ephemeral Port` (sudah ada sebelumnya) plus 19 term baru — TIME_WAIT, Accept Queue (Backlog), Sequence Number (TCP), Keep-Alive, SLA, Optimistic Locking, Pessimistic Locking, Head-of-Line Blocking, Fan-Out (Messaging), Watermark (Streaming), Poison Message, Split Brain, Thundering Herd, Hot Partition, Gossip Protocol, Heartbeat, Checksum, Nonce, CIDR.
 
-**Langkah berikutnya**: sisa pekerjaan murni `99 Glossary` (19/20 tersisa). **← berikutnya.**
+**Dengan ini, seluruh manifest (`00`–`99`) sudah lengkap** — setiap folder terisi sampai kedalaman maksimal yang direncanakan. Satu-satunya pekerjaan yang tersisa adalah item follow-up yang sudah dicatat di atas: menambahkan link balik dari ~60-70 concept note ke 25 case study yang menautkannya (persyaratan bidirectional link §10 CLAUDE.md). Ini murni pass mekanis penutup, bukan konten baru — vault secara substantif sudah selesai dibangun.
 
-Setelah `99 Glossary` selesai, seluruh manifest (`00`–`99`) akan lengkap kecuali item follow-up bidirectional-link case study yang dicatat di atas — itu jadi langkah penutup terakhir.
-
-Seluruh link forward yang ditautkan dari domain `10`–`90`, `92 Tools`, `94 Case Studies`, dan `95 Projects` yang belum ditulis (sisa glossary) **sudah terdaftar di [[Vault Manifest]]**, jadi tidak perlu entri baru di tabel backlog di atas; ini murni "belum ditulis", bukan "gap kurikulum".
+Seluruh link forward yang tersisa di seluruh vault (tool note dan case study yang ditautkan tapi belum ditulis sebelum batch ini, kini semuanya sudah ada) **sudah terverifikasi resolve** lewat pengecekan link otomatis per folder sepanjang proses penulisan; tidak ada broken link yang diketahui di luar item follow-up di atas.
 
 Setiap note yang sudah ditulis mengikuti struktur lengkap `02 Templates/Concept Note Template.md` (TL;DR, Problem, Intuition dengan catatan kebocoran analogi, How It Works, In Go, In His Stack, Trade-offs, 3 Common Mistakes, Exercises dengan soal desain terbuka, Self-Check, Connected Notes, Further Reading, Catatan Saya kosong) — pertahankan standar yang sama persis untuk note-note berikutnya, jangan diringkas.
 
