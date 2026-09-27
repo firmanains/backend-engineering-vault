@@ -47,7 +47,7 @@ Seorang engineer yang bisa menulis query yang *bekerja* tapi tidak paham `EXPLAI
 16. [[ACID]] — empat jaminan yang mendasari kepercayaan pada database relasional.
 17. [[Basic Isolation Levels]] — kenapa isolation level default MySQL dan PostgreSQL berbeda dan itu penting.
 18. [[database-sql and sqlx]] — cara idiomatic memanggil SQL dari Go.
-19. [[Prepared Statements]] — performa dan pertahanan dari SQL injection dalam satu mekanisme.
+19. [[Prepared Statements]] — pertahanan dari SQL injection, dan kapan (tidak) memberi manfaat performa.
 20. [[Connection Pooling]] — kenapa membuka koneksi baru tiap request adalah cara membunuh database-mu sendiri.
 21. [[Database Migrations]] — mengubah skema tanpa kehilangan data atau uptime.
 
@@ -60,7 +60,7 @@ Seorang engineer yang bisa menulis query yang *bekerja* tapi tidak paham `EXPLAI
 26. [[Isolation Levels and Their Anomalies]] — dirty read, non-repeatable read, phantom read, write skew.
 27. [[MVCC]] — bagaimana database membaca tanpa memblokir penulisan yang sedang berjalan.
 28. [[Locking and Row Locks]] — mengendalikan akses konkuren di level baris, bukan tabel.
-29. [[Deadlocks]] — dua transaksi saling menunggu, dan cara mendiagnosisnya.
+29. [[Deadlocks]] — dua transaction saling menunggu, dan cara mendiagnosisnya.
 30. [[The N+1 Query Problem]] — jebakan performa paling umum di aplikasi berbasis ORM.
 31. [[Tuning the Connection Pool]] — ukuran pool yang tepat untuk beban nyata.
 32. [[Read Replicas and Replication Lag]] — membagi beban baca, dan konsekuensi data yang sedikit tertinggal.
@@ -73,7 +73,7 @@ Seorang engineer yang bisa menulis query yang *bekerja* tapi tidak paham `EXPLAI
 36. [[Row-Oriented vs Columnar Storage]] — dua cara menyusun data di disk untuk beban kerja berbeda.
 37. [[OLTP vs OLAP vs HTAP]] — kenapa query analitik di database transaksional adalah bau arsitektur.
 38. [[LSM-Trees vs B-Trees]] — dua struktur penyimpanan dengan trade-off write vs read yang berlawanan.
-39. [[Write Amplification and Compression]] — biaya tersembunyi dari storage engine berbasis LSM.
+39. [[Write Amplification and Compression]] — biaya tulis tersembunyi di B-Tree maupun LSM-Tree, dan peran kompresi.
 40. [[Beyond Relational - Document, Key-Value, Wide-Column, Graph, and Time-Series Stores]] — memilih model data berdasarkan pola akses, bukan tren.
 41. [[Inverted Indexes and How Search Engines Work]] — struktur data di balik pencarian full-text.
 42. [[Relevance Scoring]] — kenapa hasil pencarian punya urutan, bukan sekadar cocok atau tidak.

@@ -48,21 +48,31 @@ Diagram ini menunjukkan bahwa Stream 1 dan Stream 3 berjalan bersamaan secara lo
 
 ## In Go
 
-`net/http` di Go mendukung HTTP/2 secara otomatis untuk koneksi HTTPS — negosiasi versi protokol terjadi lewat mekanisme ALPN saat TLS handshake (lihat [[The TLS Handshake]]), tanpa perlu konfigurasi eksplisit tambahan untuk kasus umum.
+`net/http` di Go mendukung HTTP/2 secara otomatis untuk koneksi HTTPS — negosiasi versi protokol terjadi lewat mekanisme ALPN saat TLS handshake (lihat [[The TLS Handshake]]), tanpa perlu konfigurasi eksplisit tambahan untuk kasus umum. Pengecualian yang sering menjebak: `http.Transport` kustom yang menyetel `TLSClientConfig` atau fungsi dial sendiri akan diam-diam tetap di HTTP/1.1 kecuali `ForceAttemptHTTP2: true` disetel. `http.DefaultTransport` sudah menyetelnya.
 
 ```go
-// http.Client default Go akan otomatis memakai HTTP/2 kalau server
-// tujuannya mendukungnya dan koneksinya lewat HTTPS — tidak ada kode
-// tambahan yang perlu ditulis untuk ini.
-resp, err := http.Get("https://api.partner.go.id/dokumen/12345")
-if err != nil {
-    return fmt.Errorf("get: %w", err)
+// http.DefaultClient akan otomatis memakai HTTP/2 kalau server
+// tujuannya mendukungnya dan koneksinya lewat HTTPS.
+func fetchDocument(ctx context.Context) (string, error) {
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+        "https://api.partner.go.id/dokumen/12345", nil)
+    if err != nil {
+        return "", fmt.Errorf("build request: %w", err)
+    }
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return "", fmt.Errorf("get: %w", err)
+    }
+    defer resp.Body.Close()
+    return resp.Proto, nil // "HTTP/2.0" kalau negosiasi ALPN berhasil
 }
-defer resp.Body.Close()
 
-// Untuk memastikan/memaksa HTTP/2 secara eksplisit (berguna saat
-// debugging atau saat memakai transport kustom), package
-// golang.org/x/net/http2 menyediakan konfigurasi tambahan.
+// Transport kustom TIDAK otomatis mencoba HTTP/2 kalau ia menyetel
+// TLSClientConfig atau DialContext sendiri. Aktifkan secara eksplisit:
+var partnerTransport = &http.Transport{
+    TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
+    ForceAttemptHTTP2: true,
+}
 ```
 
 > [!question] Perlu diverifikasi

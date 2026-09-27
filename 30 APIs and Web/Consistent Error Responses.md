@@ -79,13 +79,16 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(statusHTTP)
-    json.NewEncoder(w).Encode(ErrorResponse{
+    if encErr := json.NewEncoder(w).Encode(ErrorResponse{
         Error: ErrorDetail{
             Code:      code,
             Message:   pesanAman,
             RequestID: requestID,
         },
-    })
+    }); encErr != nil {
+        // Status sudah terkirim; yang tersisa hanya mencatatnya.
+        log.Printf("request_id=%s encode error response: %v", requestID, encErr)
+    }
 }
 
 func klasifikasikanError(err error) (code string, statusHTTP int, pesanAman string) {

@@ -56,6 +56,8 @@ Pemilihan antara orchestration dan choreography bukan soal mana yang "lebih baik
 
 Compensating action yang didesain dengan baik bersifat **idempoten** (lihat [[../30 APIs and Web/Idempotency|Idempotency]]) — kemungkinan compensating action dipanggil lebih dari sekali (karena retry setelah kegagalan jaringan, misalnya) harus tetap menghasilkan keadaan akhir yang benar, bukan membatalkan sesuatu dua kali dengan efek yang salah (misalnya mengembalikan kuota dua kali untuk satu pembatalan).
 
+Kelemahan yang sering tidak disadari sampai terlambat: saga tidak punya **isolation**, huruf "I" dari ACID. Di transaksi database tunggal, perubahan yang belum commit tidak terlihat pihak lain. Di saga, setiap langkah lokal commit sendiri-sendiri, sehingga keadaan "setengah jalan" (kuota sudah terkunci, dokumen belum terverifikasi) benar-benar terlihat oleh siapa pun yang membaca data itu saat saga masih berjalan. Kalau pengguna lain melihat status "kuota terkunci" itu dan mengambil keputusan berdasarkan itu, lalu saga dibatalkan dan kuota dilepas kembali, keputusan yang sudah terlanjur diambil bisa jadi tidak lagi valid. Pola *semantic lock* (menandai data yang sedang diproses saga dengan status eksplisit, seperti "menunggu verifikasi", dan mencegah pembacaan/penulisan lain terhadap data itu sampai saga selesai) adalah mitigasi yang umum dipakai, bukan solusi yang menghilangkan masalah ini sepenuhnya.
+
 ## In Go
 
 ```go
@@ -160,6 +162,7 @@ Saga menambah kompleksitas nyata dibanding transaksi database tunggal — setiap
 ## Further Reading
 
 - Hector Garcia-Molina dan Kenneth Salem, "Sagas" (1987) — paper akademik asli yang memperkenalkan konsep saga, meski dalam konteks database tunggal; adaptasinya ke microservices adalah perkembangan industri belakangan.
+- Chris Richardson, *Microservices Patterns* (Manning, 2018), bab tentang saga — pembahasan paling lengkap soal isolation anomalies pada saga dan mitigasi semantic lock.
 
 ## Catatan Saya
 

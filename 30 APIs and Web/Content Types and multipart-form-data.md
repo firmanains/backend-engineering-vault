@@ -80,7 +80,9 @@ func kirimDokumen(ctx context.Context, url, status string, isiFile io.Reader, na
     var buf bytes.Buffer
     writer := multipart.NewWriter(&buf)
 
-    writer.WriteField("status", status)
+    if err := writer.WriteField("status", status); err != nil {
+        return fmt.Errorf("tulis field status: %w", err)
+    }
 
     part, err := writer.CreateFormFile("file", namaFile)
     if err != nil {
@@ -89,7 +91,9 @@ func kirimDokumen(ctx context.Context, url, status string, isiFile io.Reader, na
     if _, err := io.Copy(part, isiFile); err != nil {
         return fmt.Errorf("salin isi file: %w", err)
     }
-    writer.Close() // WAJIB — menuliskan boundary penutup
+    if err := writer.Close(); err != nil { // WAJIB — menuliskan boundary penutup
+        return fmt.Errorf("tutup multipart writer: %w", err)
+    }
 
     req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &buf)
     if err != nil {
@@ -102,9 +106,14 @@ func kirimDokumen(ctx context.Context, url, status string, isiFile io.Reader, na
         return fmt.Errorf("kirim dokumen: %w", err)
     }
     defer resp.Body.Close()
+    if resp.StatusCode >= 300 {
+        return fmt.Errorf("partner menolak dokumen: status %d", resp.StatusCode)
+    }
     return nil
 }
 ```
+
+Versi ini menampung seluruh body multipart di `bytes.Buffer` sebelum dikirim. Untuk file besar, pola streaming dengan `io.Pipe` (goroutine menulis multipart ke satu ujung pipe, request membaca dari ujung lainnya) menghindari buffering itu; lihat [[Streaming vs Buffering]].
 
 `writer.FormDataContentType()` secara otomatis menghasilkan boundary yang cukup acak — kamu tidak perlu (dan sebaiknya tidak) menuliskan boundary secara manual.
 
@@ -125,7 +134,7 @@ func kirimDokumen(ctx context.Context, url, status string, isiFile io.Reader, na
 > Tidak mengatur `Content-Type` yang sesuai (termasuk boundary yang benar) saat mengirim atau menerima request multipart, menyebabkan server gagal mem-parsing body meski datanya sebenarnya terstruktur dengan benar.
 
 > [!warning] Jebakan
-> Memanggil `ParseMultipartForm` tanpa mempertimbangkan batas ukuran (`maxMemory`) yang wajar, membuka celah upload yang sangat besar menghabiskan memori server — dibahas lebih dalam di [[Request Size Limits Along The Path]].
+> Mengira argumen `maxMemory` di `ParseMultipartForm` adalah batas ukuran upload. Ia hanya membatasi porsi yang disimpan di memori; sisanya ditulis ke file sementara di disk. Tanpa `http.MaxBytesReader` di depannya, upload raksasa tetap bisa menghabiskan disk server — dibahas lebih dalam di [[Request Size Limits Along The Path]].
 
 ## Exercises
 
@@ -142,7 +151,7 @@ func kirimDokumen(ctx context.Context, url, status string, isiFile io.Reader, na
 - Kenapa data biner tidak bisa aman disisipkan langsung ke field string JSON?
 - Apa fungsi boundary di `multipart/form-data`?
 - Kapan `multipart/form-data` lebih tepat dipakai dibanding JSON?
-- Apa risiko memanggil `ParseMultipartForm` tanpa batas ukuran yang wajar?
+- Kenapa `maxMemory` di `ParseMultipartForm` bukan batas ukuran upload?
 
 ## Connected Notes
 

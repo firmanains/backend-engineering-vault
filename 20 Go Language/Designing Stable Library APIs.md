@@ -33,7 +33,7 @@ Analogi ini bocor pada satu hal: stopkontak fisik butuh keputusan standar yang b
 **Prinsip inti merancang permukaan API yang kecil dan disengaja:**
 
 - **Ekspor sesedikit mungkin.** Setiap identifier dengan huruf besar (exported) adalah janji stabilitas jangka panjang — field, function, atau tipe yang tidak diekspor (huruf kecil) bisa diubah bebas tanpa memengaruhi pemakai eksternal sama sekali. Pertanyaan yang harus selalu ditanya sebelum mengekspor sesuatu: "apakah pemakai eksternal benar-benar butuh mengakses ini secara langsung?"
-- **Kembalikan interface, terima interface secara minimal** (aturan umum "accept interfaces, return structs" punya nuansa — lihat catatan di bawah). Struct konkret yang dikembalikan memberi fleksibilitas menambah method baru tanpa breaking change; parameter interface yang diterima memberi fleksibilitas pemakai menyediakan implementasi apa pun yang memenuhi kontrak minimal yang dibutuhkan.
+- **Terima interface seminimal mungkin, kembalikan struct konkret** (aturan umum "accept interfaces, return structs" punya nuansa — lihat catatan di bawah). Struct konkret yang dikembalikan memberi fleksibilitas menambah method baru tanpa breaking change; parameter interface yang diterima memberi fleksibilitas pemakai menyediakan implementasi apa pun yang memenuhi kontrak minimal yang dibutuhkan.
 - **Constructor, bukan struct literal.** Mendorong pemakai memakai `NewXxx()` alih-alih membuat struct literal langsung (`Xxx{}`) memberi kebebasan menambah field baru (termasuk field wajib yang perlu validasi) tanpa breaking change bagi kode yang sudah memakai constructor.
 - **Functional options untuk konfigurasi yang mungkin berkembang** (lihat [[Functional Options]]) — memberi jalur menambah kemampuan tanpa breaking change pada signature constructor.
 
@@ -57,7 +57,10 @@ Diagram ini menunjukkan tujuan inti: memaksimalkan area yang **bebas diubah** (i
 ```go
 package validasi
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // HasilValidasi TIDAK mengekspor field-nya — pemakai berinteraksi lewat
 // method, bukan mengakses/membuat struct literal langsung. Ini memberi
@@ -87,7 +90,7 @@ func ValidasiNIK(nik string) (HasilValidasi, error) {
 	return HasilValidasi{valid: true}, nil
 }
 
-var ErrInputTidakValid = fmt.Errorf("input tidak valid")
+var ErrInputTidakValid = errors.New("input tidak valid")
 ```
 
 ```go

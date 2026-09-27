@@ -31,13 +31,16 @@ Analogi "kantor pos kecil vs hub besar" ini bisa menyiratkan bahwa **volume** tr
 ## How It Works
 
 ```go
-mux := http.NewServeMux()
-mux.HandleFunc("GET /dokumen/{id}", getDokumenHandler)
-mux.HandleFunc("PATCH /dokumen/{id}", updateDokumenHandler)
-mux.HandleFunc("GET /pemohon/{pemohonID}/dokumen", listDokumenByPemohonHandler)
+func newMux() *http.ServeMux {
+    mux := http.NewServeMux()
+    mux.HandleFunc("GET /dokumen/{id}", getDokumenHandler)
+    mux.HandleFunc("PATCH /dokumen/{id}", updateDokumenHandler)
+    mux.HandleFunc("GET /pemohon/{pemohonID}/dokumen", listDokumenByPemohonHandler)
+    return mux
+}
 ```
 
-`r.PathValue("id")` di dalam handler mengambil nilai wildcard yang cocok dari path. Saat beberapa pattern terdaftar bisa sama-sama cocok dengan satu request, `ServeMux` punya aturan presedensi (pattern yang lebih spesifik umumnya menang) — detail persisnya sebaiknya diperiksa langsung di dokumentasi resmi versi Go yang dipakai, bukan ditebak, karena aturan ini bisa halus dan berpengaruh nyata saat pattern-pattern yang terdaftar tumpang tindih.
+`r.PathValue("id")` di dalam handler mengambil nilai wildcard yang cocok dari path. Nilai itu sudah di-unescape, jadi `%2F` di URL tiba sebagai `/` di dalam nilainya. Jangan pernah memakainya langsung sebagai path file tanpa validasi (lihat [[Upload and Download Patterns]]). Saat beberapa pattern terdaftar bisa sama-sama cocok dengan satu request, `ServeMux` punya aturan presedensi (pattern yang lebih spesifik umumnya menang) — detail persisnya sebaiknya diperiksa langsung di dokumentasi resmi versi Go yang dipakai, bukan ditebak, karena aturan ini bisa halus dan berpengaruh nyata saat pattern-pattern yang terdaftar tumpang tindih.
 
 ## In Go
 
@@ -61,7 +64,8 @@ func main() {
     registerPemohonRoutes(mux, pemohonService)
 
     handler := chain(mux, loggingMiddleware, recoverMiddleware) // lihat net-http Handlers and Middleware
-    http.ListenAndServe(":8080", handler)
+    srv := &http.Server{Addr: ":8080", Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+    log.Fatal(srv.ListenAndServe())
 }
 ```
 

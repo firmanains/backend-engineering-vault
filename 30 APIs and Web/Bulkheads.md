@@ -18,9 +18,9 @@ created: 2026-08-02
 
 ## The Problem
 
-Service permohonan di sistem legal-services memanggil tiga dependensi berbeda dalam menangani satu request: database internal (cepat, hampir selalu sehat), layanan notifikasi email (kadang lambat tapi jarang benar-benar down), dan layanan verifikasi dokumen eksternal (kadang mengalami downtime, seperti dibahas di note-note sebelumnya). Ketiga panggilan ini memakai **goroutine pool HTTP client yang sama** dengan jumlah koneksi maksimum terbatas (praktik umum untuk membatasi resource, dibahas di [[Tuning the Connection Pool]]).
+Service permohonan di sistem legal-services memanggil tiga dependensi berbeda dalam menangani satu request: database internal (cepat, hampir selalu sehat), layanan notifikasi email (kadang lambat tapi jarang benar-benar down), dan layanan verifikasi dokumen eksternal (kadang mengalami downtime, seperti dibahas di note-note sebelumnya). Ketiga panggilan ini dijalankan dari **worker pool yang sama** berisi 20 goroutine (praktik umum untuk membatasi concurrency, dibahas di [[Worker Pools]]): setiap request permohonan menempati satu worker selama ia memanggil dependensi-dependensinya.
 
-Ketika layanan verifikasi dokumen mengalami downtime dan setiap panggilan ke sana menunggu penuh sampai timeout sebelum gagal, goroutine-goroutine yang menunggu itu menahan slot di connection pool bersama dalam waktu lama. Karena pool itu dipakai bersama ketiga dependensi, slot yang tersedia untuk memanggil database internal dan layanan notifikasi juga ikut habis — meski keduanya sepenuhnya sehat dan cepat merespons. Request yang seharusnya hanya butuh database internal (yang sehat) ikut gagal atau tertahan lama, karena tidak ada slot connection pool tersisa untuknya — satu dependensi yang bermasalah "menenggelamkan" kemampuan sistem melayani permintaan yang sama sekali tidak bergantung padanya.
+Ketika layanan verifikasi dokumen mengalami downtime dan setiap panggilan ke sana menunggu penuh sampai timeout sebelum gagal, worker-worker yang menunggu itu tertahan lama. Karena pool itu dipakai bersama untuk semua pekerjaan, worker yang tersedia untuk memanggil database internal dan layanan notifikasi juga ikut habis — meski keduanya sepenuhnya sehat dan cepat merespons. Request yang seharusnya hanya butuh database internal (yang sehat) ikut gagal atau tertahan lama, karena tidak ada worker tersisa untuknya — satu dependensi yang bermasalah "menenggelamkan" kemampuan sistem melayani permintaan yang sama sekali tidak bergantung padanya.
 
 ## Intuition
 
@@ -33,7 +33,7 @@ Analogi ini nyaris tidak bocor sama sekali — bahkan istilah teknis "bulkhead" 
 ```mermaid
 flowchart TD
     subgraph TanpaBulkhead["Tanpa Bulkhead"]
-        Pool["Connection pool bersama (20 slot)"]
+        Pool["Worker pool bersama (20 slot)"]
         Pool --> DB1["Database (sehat)"]
         Pool --> Notif1["Notifikasi (sehat)"]
         Pool --> Verif1["Verifikasi (down, menahan semua slot)"]
@@ -78,11 +78,15 @@ func NewBulkhead(kapasitas int) *Bulkhead {
 }
 
 func (b *Bulkhead) Jalankan(ctx context.Context, operasi func(context.Context) error) error {
+	// Fail-fast: karena ada cabang default, select ini TIDAK PERNAH menunggu.
+	// Kalau slot penuh, panggilan langsung ditolak. Versi yang boleh menunggu
+	// sebentar cukup menghapus default dan mengandalkan deadline di ctx.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("context sudah selesai sebelum masuk bulkhead: %w", err)
+	}
 	select {
 	case b.semaphore <- struct{}{}:
 		defer func() { <-b.semaphore }()
-	case <-ctx.Done():
-		return fmt.Errorf("dibatalkan saat menunggu slot bulkhead: %w", ctx.Err())
 	default:
 		return fmt.Errorf("bulkhead penuh, menolak panggilan untuk mencegah kelebihan beban")
 	}

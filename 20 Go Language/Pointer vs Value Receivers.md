@@ -33,7 +33,9 @@ Analogi ini bocor pada soal biaya. Fotokopi di dunia nyata harganya kurang lebih
 Setiap tipe di Go punya **method set** — kumpulan method yang bisa dipanggil pada value tipe itu:
 
 - Method dengan **value receiver** masuk ke method set baik untuk `T` maupun `*T`.
-- Method dengan **pointer receiver** hanya masuk ke method set untuk `*T` — **tidak** untuk `T` biasa, kecuali value itu addressable (variable biasa, bukan hasil langsung dari map atau interface) sehingga compiler bisa otomatis mengambil alamatnya.
+- Method dengan **pointer receiver** hanya masuk ke method set untuk `*T` — **tidak pernah** untuk `T`.
+
+Yang sering membingungkan: kamu tetap bisa menulis `doc.Validasi()` pada variable `doc` bertipe `T`. Itu karena compiler menulis ulang panggilan tersebut menjadi `(&doc).Validasi()` selama `doc` addressable (variable biasa, bukan hasil langsung dari map lookup atau value di dalam interface). Ini kemudahan sintaks pemanggilan, bukan perubahan method set, dan karena itulah ia tidak menolong saat `T` di-assign ke interface.
 
 Ini artinya: kalau sebuah interface mensyaratkan method dengan pointer receiver, hanya `*T` yang memenuhi interface itu — `T` polos tidak akan pernah dianggap memenuhi interface tersebut, berapa pun mirip method-nya terlihat.
 

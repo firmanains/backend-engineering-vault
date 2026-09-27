@@ -62,6 +62,8 @@ func (l *LayananVerifikasi) VerifikasiDenganRetry(ctx context.Context, nik strin
             return ok, nil
         }
         lastErr = err
+        // Backoff antar percobaan sengaja dihilangkan supaya contoh ini fokus
+        // pada mocking; di production, lihat Retries with Exponential Backoff and Jitter.
         if !errors.Is(err, ErrPartnerTimeout) {
             return false, fmt.Errorf("verifikasi gagal permanen: %w", err) // tidak retry untuk error non-timeout
         }

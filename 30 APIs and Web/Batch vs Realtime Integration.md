@@ -54,6 +54,7 @@ package integrasi
 
 import (
 	"context"
+	"log"
 	"time"
 )
 
@@ -80,10 +81,23 @@ func prosesSatuPembayaran(ctx context.Context, e PembayaranEvent) error { return
 func hitungAgregatBulanan(ctx context.Context) error                    { return nil }
 
 func contohPenjadwalanBatch(ctx context.Context) {
+	// Contoh in-process sederhana. Di production, jadwal seperti ini lebih
+	// aman diserahkan ke cron atau Kubernetes CronJob: ticker di dalam
+	// process ikut hilang setiap kali process di-restart atau di-deploy.
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
-	for range ticker.C {
-		GenerateLaporanBulanan(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sekarang := <-ticker.C:
+			if sekarang.Day() != 1 { // laporan bulanan hanya dibuat tiap tanggal 1
+				continue
+			}
+			if err := GenerateLaporanBulanan(ctx); err != nil {
+				log.Printf("generate laporan bulanan: %v", err)
+			}
+		}
 	}
 }
 ```

@@ -50,6 +50,8 @@ Diagram ini menunjukkan komponen inti sharding: **sharding key** (di sini, `kode
 
 **Kenapa sharding key salah pilih sangat mahal diperbaiki**: begitu data sudah tersebar berdasarkan satu sharding key, mengubah strategi itu berarti **memindahkan data secara fisik** antar shard. Ini proses yang jauh lebih rumit dan berisiko dibanding mengubah index atau menambah partition, karena melibatkan koordinasi lintas banyak instance database yang independen, seringkali sambil sistem tetap harus melayani trafik. Ini kenapa keputusan sharding key idealnya dipikirkan matang di awal berdasarkan pola akses yang benar-benar dominan, bukan ditentukan sembarangan dengan asumsi bisa "diperbaiki nanti".
 
+**ID harus unik secara global, bukan per shard.** `AUTO_INCREMENT` di setiap shard berjalan sendiri-sendiri, sehingga shard 1 dan shard 2 sama-sama akan menghasilkan permohonan dengan `id = 1`. Sistem yang di-shard butuh skema ID yang tidak bentrok: UUID (idealnya UUIDv7 yang terurut waktu, lihat [[B+Tree Structure]]), ID bergaya Snowflake yang menyertakan nomor shard, atau `auto_increment_increment`/`auto_increment_offset` yang berbeda per shard di MySQL/MariaDB. Contoh kode di bawah juga memperlihatkan konsekuensi lain: `AmbilPermohonan` butuh `kodeProvinsi` untuk tahu shard mana yang dituju. Tanpa sharding key, satu-satunya cara mencari sebuah `id` adalah bertanya ke semua shard.
+
 **Operasi lintas shard adalah pengorbanan intinya**: `JOIN` antara dua tabel yang tersebar di shard berbeda tidak bisa dilakukan database secara native seperti `JOIN` biasa. Aplikasi (atau lapisan middleware) harus melakukan "join" itu sendiri: query ke shard A, query ke shard B, gabungkan hasilnya di memori aplikasi. Transaction yang menyentuh baris di lebih dari satu shard sekaligus (misalnya transfer saldo antar rekening yang kebetulan berada di shard berbeda) kehilangan jaminan ACID sederhana yang biasa didapat dalam satu instance. Ini butuh pola seperti **distributed transaction** atau **saga** (dibahas jauh lebih dalam di level senior, `60 Distributed Systems`) untuk menjaga konsistensi lintas shard.
 
 Pengantar ini sengaja berhenti di prinsip dasar dan risiko sharding. Strategi memilih kunci sharding secara matang untuk menghindari hot shard, dan pola menangani transaction lintas shard, dibahas jauh lebih dalam sebagai topik senior di [[../60 Distributed Systems/Sharding Strategies and Hot Partitions|Sharding Strategies and Hot Partitions]] dan [[../60 Distributed Systems/Consistent Hashing|Consistent Hashing]] — dua note yang secara sengaja ditempatkan di `60 Distributed Systems` karena kompleksitasnya jauh melampaui pengantar level intermediate ini (lihat `Curriculum Changelog.md`, keputusan pemetaan domain).
@@ -81,13 +83,15 @@ func NewRouter(shards []*sql.DB) *Router {
 // shardUntukKey menghitung indeks shard dari sharding key memakai hash —
 // kunci yang sama SELALU menghasilkan shard yang sama, tapi kunci yang
 // berbeda tersebar cukup merata lintas shard yang tersedia.
+//
+// Kelemahan modulo: menambah satu shard mengubah hasil "% len" untuk hampir
+// semua kunci, sehingga hampir semua data harus dipindah. Itulah masalah
+// yang diselesaikan consistent hashing.
 func (r *Router) shardUntukKey(kunci string) *sql.DB {
 	h := fnv.New32a()
-	h.Write([]byte(kunci))
-	indeks := int(h.Sum32()) % len(r.shards)
-	if indeks < 0 {
-		indeks += len(r.shards)
-	}
+	// Write pada hash.Hash didokumentasikan tidak pernah mengembalikan error.
+	_, _ = h.Write([]byte(kunci))
+	indeks := h.Sum32() % uint32(len(r.shards))
 	return r.shards[indeks]
 }
 
@@ -105,10 +109,12 @@ func (r *Router) AmbilPermohonan(ctx context.Context, kodeProvinsi string, id in
 	return status, nil
 }
 
-// HitungTotalPermohonanSemuaShard adalah operasi LINTAS SHARD — harus
-// query SETIAP shard secara terpisah dan menjumlahkan hasilnya di
-// aplikasi, karena tidak ada satu query tunggal yang bisa menjangkau
-// seluruh shard sekaligus.
+// HitungTotalPermohonanSemuaShard adalah operasi lintas shard: setiap shard
+// di-query terpisah dan hasilnya dijumlahkan di aplikasi, karena tidak ada
+// satu query yang menjangkau seluruh shard. Versi produksi biasanya
+// menjalankannya paralel (misalnya dengan errgroup). Perlu diingat juga
+// bahwa angka dari tiap shard diambil di momen yang sedikit berbeda, jadi
+// totalnya bukan snapshot satu titik waktu.
 func (r *Router) HitungTotalPermohonanSemuaShard(ctx context.Context) (int64, error) {
 	var total int64
 	for i, db := range r.shards {
@@ -150,7 +156,7 @@ Sharding adalah salah satu keputusan arsitektur paling mahal untuk dibatalkan �
 
 > [!success]- Kunci jawaban
 > **1.** Read replica **menyalin** seluruh data ke banyak instance untuk membagi beban **baca** — setiap replica punya salinan lengkap data yang sama. Sharding **membelah** data jadi potongan berbeda yang masing-masing hanya ada di satu shard: tidak ada shard yang punya salinan lengkap seluruh data. Sharding membagi beban baca **dan** tulis sekaligus, karena setiap shard menangani subset data dan subset trafik yang menyertainya, bukan seluruh trafik terhadap seluruh data seperti replica.
-> **4.** Sharding murni berdasarkan kode provinsi berisiko hot shard karena jumlah data dan trafik antar provinsi di Indonesia sangat tidak merata — shard yang menyimpan data DKI Jakarta bisa menerima beban jauh melebihi shard provinsi dengan populasi/aktivitas jauh lebih kecil, meniadakan tujuan awal sharding (membagi beban merata). Salah satu arah penyesuaian: alih-alih satu provinsi = satu shard secara kaku, pisahkan provinsi dengan volume sangat besar (seperti DKI Jakarta) menjadi **beberapa** shard sendiri (misalnya dipecah lagi berdasarkan kode kecamatan/wilayah dalam provinsi itu), sementara provinsi-provinsi kecil bisa **digabung** dalam satu shard yang sama. Ini pendekatan yang lebih dekat ke hash-based sharding dengan mempertimbangkan bobot volume data per unit, alih-alih range/list sharding naif yang mengasumsikan setiap unit (provinsi) punya volume yang kurang lebih sama.
+> **4.** Sharding murni berdasarkan kode provinsi berisiko hot shard karena jumlah data dan trafik antar provinsi di Indonesia sangat tidak merata — shard yang menyimpan data DKI Jakarta bisa menerima beban jauh melebihi shard provinsi dengan populasi/aktivitas jauh lebih kecil, meniadakan tujuan awal sharding (membagi beban merata). Salah satu arah penyesuaian: alih-alih satu provinsi = satu shard secara kaku, pakai **directory-based sharding**. Sebuah tabel pemetaan menentukan unit mana tinggal di shard mana. Provinsi dengan volume sangat besar (seperti DKI Jakarta) dipecah menjadi **beberapa** shard, misalnya berdasarkan kota/kabupaten di dalamnya, sementara provinsi-provinsi kecil **digabung** dalam satu shard. Tabel pemetaan juga memungkinkan satu unit dipindah ke shard lain kelak tanpa mengubah rumus hash. Arah alternatifnya adalah meninggalkan provinsi sebagai kunci dan memakai hash dari kunci yang lebih halus (misalnya ID pemohon). Distribusinya jauh lebih merata, tapi query "semua permohonan di satu provinsi" berubah menjadi operasi lintas shard.
 
 ## Self-Check
 

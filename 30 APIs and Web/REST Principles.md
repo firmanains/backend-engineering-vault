@@ -56,10 +56,13 @@ flowchart LR
 ```go
 // Gaya REST: resource di path, method HTTP menyatakan aksi.
 // Menggunakan http.ServeMux (Go 1.22+) dengan method matching bawaan.
-mux := http.NewServeMux()
-mux.HandleFunc("GET /dokumen/{id}", getDokumenHandler)
-mux.HandleFunc("PATCH /dokumen/{id}", updateDokumenHandler)
-mux.HandleFunc("DELETE /dokumen/{id}", deleteDokumenHandler)
+func newRouter() *http.ServeMux {
+    mux := http.NewServeMux()
+    mux.HandleFunc("GET /dokumen/{id}", getDokumenHandler)
+    mux.HandleFunc("PATCH /dokumen/{id}", updateDokumenHandler)
+    mux.HandleFunc("DELETE /dokumen/{id}", deleteDokumenHandler)
+    return mux
+}
 
 func getDokumenHandler(w http.ResponseWriter, r *http.Request) {
     id := r.PathValue("id")
@@ -73,14 +76,13 @@ func getDokumenHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(doc)
+    if err := json.NewEncoder(w).Encode(doc); err != nil {
+        log.Printf("encode dokumen %s: %v", id, err)
+    }
 }
 ```
 
-> [!question] Perlu diverifikasi
-> Klaim: `http.ServeMux` bawaan Go mendukung pattern method HTTP (`"GET /path"`) dan wildcard path (`{id}`) sejak versi tertentu.
-> Kenapa ragu: fitur routing bawaan `net/http` mengalami penambahan signifikan di rilis Go yang relatif baru — proyek yang memakai versi Go lebih lama mungkin butuh router pihak ketiga untuk fitur yang sama.
-> Cara verifikasi: periksa versi Go di `go.mod` proyek dan baca release notes Go terkait `net/http` `ServeMux` enhancements.
+Pattern dengan method (`"GET /path"`) dan wildcard (`{id}`, dibaca lewat `r.PathValue`) tersedia di `http.ServeMux` bawaan sejak Go 1.22. Proyek yang `go.mod`-nya menyatakan versi lebih lama perlu router pihak ketiga untuk fitur yang sama (lihat [[Routing in Go]]).
 
 ## In His Stack
 

@@ -53,7 +53,7 @@ Titik kegagalan paling berbahaya ada tepat di antara fase 1 dan fase 2 — begit
 
 Masalah mendasar 2PC bukan di logikanya (yang secara matematis benar untuk kasus tanpa kegagalan) — masalahnya ada di **ketergantungan tunggal pada coordinator** yang menjadi single point of failure untuk seluruh transaksi. Ini kontras tajam dengan algoritma consensus seperti Raft ([[Consensus - Raft]]) yang secara eksplisit dirancang untuk tetap berfungsi meski sebagian node (termasuk leader) gagal — 2PC klasik tidak punya mekanisme serupa; kalau coordinator gagal di waktu yang salah, sistem butuh intervensi eksternal (coordinator baru yang membaca log dan melanjutkan, atau operator manusia) untuk keluar dari keadaan blocking.
 
-Varian yang lebih canggih (three-phase commit, atau 2PC yang dikombinasikan dengan consensus untuk memilih coordinator baru secara otomatis) mengurangi masalah ini, tapi menambah kompleksitas signifikan tanpa menghilangkan trade-off fundamentalnya: menjaga atomicity ketat lintas banyak sistem selalu berarti mengorbankan availability saat sebagian dari sistem itu gagal — persis trade-off yang dijelaskan CAP theorem ([[CAP Theorem and PACELC]]), diterapkan pada konteks transaksi terdistribusi. Inilah kenapa industri secara luas beralih ke saga ([[Sagas - Orchestration vs Choreography]]) yang secara sengaja **menerima** ketidakkonsistenan sementara (keadaan "setengah selesai" yang terlihat sebentar) demi menghindari blocking, lalu memperbaikinya lewat compensating action — trade-off yang secara praktik terbukti lebih tahan terhadap kegagalan nyata dibanding mempertahankan atomicity ketat yang rapuh terhadap kegagalan coordinator tunggal.
+Varian yang lebih canggih mencoba menutup celah ini. Three-phase commit menyisipkan satu fase konfirmasi tambahan sehingga participant punya cukup informasi untuk memutuskan sendiri tanpa menunggu coordinator, tapi hanya benar-benar aman di bawah asumsi jaringan yang sinkron (batas waktu pesan terjamin); begitu terjadi network partition, 3PC bisa tetap blocking atau, lebih buruk, dua kelompok participant yang terpisah bisa mengambil keputusan berbeda. Kombinasi 2PC dengan consensus untuk memilih coordinator baru secara otomatis (seperti dipakai Google Spanner) menutup celah ini dengan lebih kokoh, tapi menambah kompleksitas signifikan tanpa menghilangkan trade-off fundamentalnya: menjaga atomicity ketat lintas banyak sistem selalu berarti mengorbankan availability saat sebagian dari sistem itu gagal — persis trade-off yang dijelaskan CAP theorem ([[CAP Theorem and PACELC]]), diterapkan pada konteks transaksi terdistribusi. Inilah kenapa industri secara luas beralih ke saga ([[Sagas - Orchestration vs Choreography]]) yang secara sengaja **menerima** ketidakkonsistenan sementara (keadaan "setengah selesai" yang terlihat sebentar) demi menghindari blocking, lalu memperbaikinya lewat compensating action — trade-off yang secara praktik terbukti lebih tahan terhadap kegagalan nyata dibanding mempertahankan atomicity ketat yang rapuh terhadap kegagalan coordinator tunggal.
 
 ## In Go
 
@@ -81,9 +81,18 @@ func RunTwoPhaseCommit(ctx context.Context, participants []Participant) error {
 	// Fase 1: Prepare
 	for _, p := range participants {
 		if err := p.Prepare(ctx); err != nil {
-			// SATU participant menolak → abort SEMUA
+			// SATU participant menolak → abort SEMUA. Kegagalan Abort di
+			// sini dikumpulkan, bukan dibuang — participant yang gagal
+			// di-abort tetap mengunci resource dan butuh penanganan manual.
+			var abortErrs []error
 			for _, p2 := range participants {
-				_ = p2.Abort(ctx)
+				if aerr := p2.Abort(ctx); aerr != nil {
+					abortErrs = append(abortErrs, aerr)
+				}
+			}
+			if len(abortErrs) > 0 {
+				return fmt.Errorf("twopc: prepare gagal (%w), DAN %d participant gagal di-abort: %w",
+					err, len(abortErrs), errors.Join(abortErrs...))
 			}
 			return fmt.Errorf("twopc: prepare gagal, semua di-abort: %w", err)
 		}

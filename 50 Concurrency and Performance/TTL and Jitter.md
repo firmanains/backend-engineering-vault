@@ -54,15 +54,18 @@ flowchart LR
 package cache
 
 import (
-	"math/rand"
+	"math/rand/v2"
 	"time"
 )
 
 // TTLDenganJitter menambahkan variasi acak ke TTL dasar, mencegah
-// banyak entri kedaluwarsa persis bersamaan.
+// banyak entri kedaluwarsa persis bersamaan. math/rand/v2 (Go 1.22+)
+// sudah di-seed otomatis dan aman dipakai banyak goroutine.
 func TTLDenganJitter(ttlDasar time.Duration, jitterMaks time.Duration) time.Duration {
-	jitter := time.Duration(rand.Int63n(int64(jitterMaks)))
-	return ttlDasar + jitter
+	if jitterMaks <= 0 {
+		return ttlDasar // rand.N panik kalau argumennya <= 0
+	}
+	return ttlDasar + rand.N(jitterMaks)
 }
 
 func contohPenggunaan() {
@@ -76,7 +79,7 @@ func contohPenggunaan() {
 
 ## Under The Hood
 
-**Besaran jitter yang tepat** biasanya sebuah persentase kecil dari TTL dasar (misalnya 5-10%) — cukup untuk menyebarkan waktu kedaluwarsa secara berarti tanpa membuat TTL efektif jadi terlalu bervariasi dari yang direncanakan. Jitter yang terlalu besar (misalnya rentang jitter sama besar dengan TTL dasarnya) membuat sebagian entri kedaluwarsa jauh lebih cepat dari yang diharapkan, sementara jitter yang terlalu kecil tidak cukup menyebarkan lonjakan yang ingin dihindari.
+**Besaran jitter yang tepat** biasanya dimulai dari persentase kecil TTL dasar (5–10% adalah titik awal yang sering dipakai, bukan aturan baku) — cukup untuk menyebarkan waktu kedaluwarsa secara berarti tanpa membuat TTL efektif jadi terlalu bervariasi dari yang direncanakan. Jitter yang terlalu besar (misalnya rentang jitter sama besar dengan TTL dasarnya) membuat sebagian entri kedaluwarsa jauh lebih cepat dari yang diharapkan, sementara jitter yang terlalu kecil tidak cukup menyebarkan lonjakan yang ingin dihindari.
 
 **Jitter juga relevan di luar TTL cache** — pola yang sama (menambah variasi acak untuk mencegah banyak hal terjadi bersamaan) dipakai luas dalam retry dengan backoff (dibahas di domain `30 APIs and Web`, resilience patterns): tanpa jitter, banyak client yang gagal bersamaan (misalnya karena partner API down sesaat) akan mencoba retry pada waktu yang **sama** persis, menciptakan lonjakan permintaan baru yang justru memperburuk kondisi partner yang sedang pulih — jitter pada retry menyebarkan percobaan ulang itu, mencegah "thundering herd" versi retry.
 
@@ -88,7 +91,6 @@ package cache
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"time"
 )
 
@@ -100,8 +102,7 @@ func SimpanDenganTTLJitter(ctx context.Context, entries map[string]string) error
 	const jitterMaks = 30 * time.Second
 
 	for key, value := range entries {
-		jitter := time.Duration(rand.Int63n(int64(jitterMaks)))
-		ttlAkhir := ttlDasar + jitter
+		ttlAkhir := TTLDenganJitter(ttlDasar, jitterMaks)
 
 		if err := simpanKeRedisDenganTTL(ctx, key, value, ttlAkhir); err != nil {
 			return fmt.Errorf("simpan cache %s: %w", key, err)
@@ -143,7 +144,7 @@ Jitter menambah sedikit variasi yang membuat waktu kedaluwarsa entri cache menja
 
 > [!success]- Kunci jawaban
 > **1.** Kalau banyak entri diisi pada waktu yang hampir bersamaan dengan TTL yang identik (misalnya semua 5 menit), maka seluruh entri itu akan mencapai waktu kedaluwarsanya pada titik waktu yang hampir sama pula (5 menit setelah pengisian) — cache miss untuk seluruh entri itu terjadi hampir serentak, dan setiap cache miss memicu query ke database, menciptakan lonjakan permintaan yang terkonsentrasi di jendela waktu yang sangat sempit, alih-alih tersebar merata seiring waktu.
-> **4.** Terapkan TTL dasar (misalnya 10 menit) dengan jitter acak sekitar 10% dari TTL dasar (1 menit, direntang 0-60 detik ditambahkan ke setiap entri) — untuk 50.000 entri, ini menyebarkan waktu kedaluwarsa ke rentang satu menit penuh alih-alih titik tunggal, mengurangi lonjakan database secara signifikan. Verifikasi: pantau metrik query rate ke database (query per detik) di sekitar waktu yang diperkirakan menjadi titik kedaluwarsa TTL sebelum dan sesudah penerapan jitter — sebelum jitter, grafik akan menunjukkan lonjakan tajam (spike) yang jelas pada interval TTL; setelah jitter diterapkan dengan benar, lonjakan itu seharusnya berubah menjadi peningkatan yang lebih landai dan tersebar sepanjang rentang jitter, bukan spike tajam pada satu titik waktu.
+> **4.** Terapkan TTL dasar (misalnya 10 menit) dengan jitter acak sekitar 10% dari TTL dasar (1 menit, direntang 0-60 detik ditambahkan ke setiap entri) — untuk 50.000 entri, ini menyebarkan waktu kedaluwarsa ke rentang satu menit penuh alih-alih titik tunggal, mengurangi lonjakan database secara signifikan. Hitung juga dampaknya, jangan berhenti di "tersebar": 50.000 cache miss yang tersebar dalam 60 detik tetap berarti sekitar 830 query tambahan per detik ke database. Kalau database tidak sanggup, perlebar rentang jitter (misalnya ±20% di sekitar TTL dasar), isi cache secara bertahap alih-alih sekaligus, atau pertimbangkan apakah 50.000 entri itu memang perlu di-warm sama sekali dibanding diisi alami lewat cache-aside. Verifikasi: pantau metrik query rate ke database (query per detik) di sekitar waktu yang diperkirakan menjadi titik kedaluwarsa TTL sebelum dan sesudah penerapan jitter — sebelum jitter, grafik akan menunjukkan lonjakan tajam (spike) yang jelas pada interval TTL; setelah jitter diterapkan dengan benar, lonjakan itu seharusnya berubah menjadi peningkatan yang lebih landai dan tersebar sepanjang rentang jitter, bukan spike tajam pada satu titik waktu.
 
 ## Self-Check
 

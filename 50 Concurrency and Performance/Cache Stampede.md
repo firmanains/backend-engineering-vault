@@ -14,11 +14,11 @@ created: 2026-07-29
 
 ## TL;DR
 
-Cache stampede (juga disebut *thundering herd* dalam konteks cache) adalah momen ketika satu cache key yang sangat populer kedaluwarsa atau di-evict, dan **ribuan request bersamaan** yang mengalami cache miss di jendela waktu yang sama semuanya memicu operasi mahal yang identik (query database, panggilan API) ke sumber data yang sama. Ini mengubah cache dari pelindung database menjadi pemicu lonjakan beban yang jauh lebih parah daripada kalau cache itu tidak pernah ada sama sekali. Ini adalah note penutup yang menyatukan tiga topik sebelumnya di domain ini — [[TTL and Jitter]], [[Eviction Policies]], dan [[singleflight]] — semuanya adalah bagian dari strategi mencegah dan memitigasi cache stampede.
+Cache stampede (juga disebut *thundering herd* dalam konteks cache) adalah momen ketika satu cache key yang sangat populer kedaluwarsa atau di-evict, dan **ribuan request bersamaan** yang mengalami cache miss di jendela waktu yang sama semuanya memicu operasi mahal yang identik (query database, panggilan API) ke sumber data yang sama. Bahayanya bukan karena bebannya lebih besar daripada tanpa cache, melainkan karena database yang kapasitasnya sudah disesuaikan dengan beban **ber-cache** tiba-tiba menerima beban setara **tanpa cache**, sekaligus. Ini adalah note penutup yang menyatukan tiga topik sebelumnya di domain ini — [[TTL and Jitter]], [[Eviction Policies]], dan [[singleflight]] — semuanya adalah bagian dari strategi mencegah dan memitigasi cache stampede.
 
 ## The Problem
 
-Sebuah dashboard yang menampilkan status permohonan untuk akun instansi resmi (dilihat oleh ribuan warga sekaligus) meng-cache hasilnya dengan TTL 5 menit. Setiap 5 menit, cache key ini kedaluwarsa, dan ribuan request yang datang **hampir bersamaan** persis di momen itu (karena akun ini memang selalu ramai diakses) semuanya mengalami cache miss secara bersamaan. Masing-masing dari ribuan request itu independen memicu query database yang identik untuk mengambil ulang data yang sama persis, membebani database dengan ribuan query duplikat dalam hitungan detik. Ini jauh lebih buruk daripada jika tidak ada cache sama sekali dan setiap request memang selalu query database — setidaknya bebannya akan tersebar merata seiring waktu, bukan terkonsentrasi di satu titik.
+Sebuah dashboard yang menampilkan status permohonan untuk akun instansi resmi (dilihat oleh ribuan warga sekaligus) meng-cache hasilnya dengan TTL 5 menit. Setiap 5 menit, cache key ini kedaluwarsa, dan ribuan request yang datang **hampir bersamaan** persis di momen itu (karena akun ini memang selalu ramai diakses) semuanya mengalami cache miss secara bersamaan. Masing-masing dari ribuan request itu independen memicu query database yang identik untuk mengambil ulang data yang sama persis, membebani database dengan ribuan query duplikat dalam hitungan detik. Perhatikan kenapa ini berbahaya. Kalau aplikasi tidak pernah memakai cache, database memang harus menanggung semua query itu, dan tim akan menyiapkan kapasitasnya sesuai beban itu. Tapi karena cache biasanya menyerap hampir semua request, database ini dikapasitasi untuk beban yang jauh lebih kecil. Saat stampede, beban penuh tanpa cache tiba sekaligus ke database yang tidak disiapkan untuknya. Lebih buruk lagi, query yang melambat di bawah beban memperpanjang jendela cache miss (belum ada yang selesai mengisi ulang cache), sehingga makin banyak request ikut menumpuk: umpan balik positif yang bisa menjatuhkan database.
 
 Masalah ini adalah kombinasi dari beberapa faktor yang sudah dibahas terpisah di note-note sebelumnya: TTL yang seragam tanpa jitter (menyebabkan kedaluwarsa serentak), dan tidak adanya mekanisme deduplikasi permintaan bersamaan (seperti `singleflight`) — masing-masing faktor ini sendirian sudah cukup berbahaya, dan kombinasi keduanya memperbesar risiko stampede secara signifikan.
 
@@ -61,56 +61,68 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"golang.org/x/sync/singleflight"
 )
 
 type EntriCache struct {
-	Data          string
+	Data            string
+	RefreshPada     time.Time // lebih awal dari KedaluwarsaPada
 	KedaluwarsaPada time.Time
-	RefreshPada     time.Time // LEBIH AWAL dari KedaluwarsaPada
 }
 
-var grup singleflight.Group
+// Sumber adalah abstraksi atas cache dan database.
+type Sumber interface {
+	Cek(ctx context.Context, key string) (EntriCache, bool)
+	// Refresh membaca data terbaru dari database, menyimpannya ke cache
+	// dengan RefreshPada/KedaluwarsaPada baru, lalu mengembalikannya.
+	Refresh(ctx context.Context, key string) (string, error)
+}
 
-// AmbilDenganRefreshProaktif menggabungkan singleflight DAN refresh
-// proaktif — pertahanan berlapis terhadap cache stampede.
-func AmbilDenganRefreshProaktif(ctx context.Context, key string) (string, error) {
-	entri, ada := cekCache(key)
+type Layanan struct {
+	sumber Sumber
+	grup   singleflight.Group
+}
 
-	if ada && time.Now().Before(entri.RefreshPada) {
-		// MASIH SEGAR, belum perlu refresh sama sekali.
+// Ambil menggabungkan refresh proaktif dan singleflight sebagai pertahanan
+// berlapis terhadap cache stampede.
+func (l *Layanan) Ambil(ctx context.Context, key string) (string, error) {
+	entri, ada := l.sumber.Cek(ctx, key)
+	sekarang := time.Now()
+
+	if ada && sekarang.Before(entri.RefreshPada) {
+		return entri.Data, nil // masih segar
+	}
+
+	if ada && sekarang.Before(entri.KedaluwarsaPada) {
+		// Sudah lewat titik refresh, belum kedaluwarsa: kembalikan data lama
+		// segera, dan picu refresh di latar belakang. DoChan hanya menjalankan
+		// fungsi untuk pemanggil pertama; pemanggil lain di jendela yang sama
+		// ikut menumpang tanpa meluncurkan goroutine baru. Channel hasilnya
+		// ber-buffer, jadi aman tidak dibaca.
+		l.grup.DoChan(key, func() (any, error) {
+			ctxLatar, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			return l.sumber.Refresh(ctxLatar, key)
+		})
 		return entri.Data, nil
 	}
 
-	if ada && time.Now().Before(entri.KedaluwarsaPada) {
-		// SUDAH LEWAT titik refresh, TAPI belum benar-benar kedaluwarsa —
-		// kembalikan data lama SEGERA, picu refresh di LATAR BELAKANG
-		// lewat singleflight (hanya SATU goroutine yang benar-benar
-		// menjalankan refresh, meski banyak request tiba di jendela ini).
-		go func() {
-			grup.Do(key, func() (interface{}, error) {
-				return refreshDataKeCache(context.Background(), key)
-			})
-		}()
-		return entri.Data, nil
-	}
-
-	// BENAR-BENAR kedaluwarsa (atau tidak ada sama sekali) — singleflight
-	// tetap melindungi dari stampede penuh pada kasus ini.
-	hasil, err, _ := grup.Do(key, func() (interface{}, error) {
-		return refreshDataKeCache(ctx, key)
+	// Benar-benar kedaluwarsa atau belum ada: singleflight tetap mencegah
+	// stampede penuh di dalam instance ini.
+	hasil, err, _ := l.grup.Do(key, func() (any, error) {
+		return l.sumber.Refresh(ctx, key)
 	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("refresh cache %s: %w", key, err)
 	}
 	return hasil.(string), nil
 }
-
-func cekCache(key string) (EntriCache, bool)                              { return EntriCache{}, false }
-func refreshDataKeCache(ctx context.Context, key string) (string, error) { return "", nil }
 ```
+
+Satu catatan tentang cabang terakhir: fungsi di `Do` memakai `ctx` milik pemanggil pertama, sehingga pembatalan oleh pemanggil itu ikut menggagalkan pemanggil lain yang menumpang. Pola yang lebih kokoh untuk kasus ini dibahas di [[singleflight]] (`DoChan` + `context.WithoutCancel`).
 
 ## In His Stack
 
@@ -133,18 +145,18 @@ Refresh proaktif menambah kompleksitas kode yang signifikan (menyimpan dua times
 
 ## Exercises
 
-1. Jelaskan kenapa cache stampede bisa membuat database lebih kewalahan dibanding kondisi tanpa cache sama sekali.
+1. Jelaskan kenapa cache stampede bisa menjatuhkan database, padahal total beban sesaatnya kira-kira setara dengan kondisi tanpa cache.
 2. Bagaimana jitter, singleflight, dan refresh proaktif masing-masing berkontribusi mencegah/memitigasi cache stampede, dan kenapa ketiganya saling melengkapi?
 3. Apa perbedaan "titik refresh" dan "titik kedaluwarsa" dalam pola refresh proaktif (stale-while-revalidate)?
 4. Desain terbuka: sistemmu punya satu endpoint yang menampilkan pengumuman nasional yang diakses jutaan kali per hari oleh warga di seluruh Indonesia, dan pengumuman ini kadang diperbarui mendadak (misalnya perubahan kebijakan darurat). Rancang strategi caching lengkap untuk endpoint ini yang menyeimbangkan kebutuhan "pembaruan harus terlihat cepat setelah diedit" dengan "database tidak boleh kewalahan oleh cache stampede", menggabungkan strategi-strategi yang dibahas di note ini.
 
 > [!success]- Kunci jawaban
-> **1.** Tanpa cache, setiap request memang selalu query database, tapi bebannya **tersebar alami** seiring waktu request datang satu per satu (atau dalam kelompok kecil yang wajar). Dengan cache yang kedaluwarsa serentak untuk key yang sangat populer, ribuan request yang **seharusnya** dilayani cache (dan tidak pernah menyentuh database sama sekali di kondisi normal) tiba-tiba **semuanya** menyentuh database dalam jendela waktu yang sangat sempit. Ini mengonsentrasikan beban yang seharusnya tidak pernah terjadi bersamaan menjadi satu lonjakan tajam, jauh lebih parah daripada distribusi beban alami tanpa cache sama sekali.
+> **1.** Secara total, beban saat stampede kira-kira setara dengan beban tanpa cache selama jendela singkat itu, bukan lebih besar. Yang membuatnya berbahaya adalah **kapasitas yang disiapkan**. Database dikapasitasi untuk beban ber-cache, yang bisa puluhan kali lebih kecil dari beban tanpa cache. Saat key populer kedaluwarsa, seluruh request yang tadinya dilayani cache tiba di database dalam hitungan milidetik. Query melambat di bawah beban itu, jendela cache miss memanjang (belum ada yang selesai mengisi ulang cache), dan makin banyak request ikut menumpuk. Umpan balik positif inilah yang mengubah satu key kedaluwarsa menjadi database yang tumbang.
 > **4.** Strategi berlapis: (1) gunakan **invalidasi eksplisit** (lihat [[Cache Invalidation Strategies]]) yang dipicu tepat saat pengumuman diedit — memastikan perubahan mendadak terlihat segera, tidak menunggu TTL alami habis; (2) untuk kasus di mana cache tetap perlu di-refresh secara berkala (jaring pengaman terhadap invalidasi yang mungkin terlewat), terapkan **refresh proaktif** dengan titik refresh jauh lebih awal dari titik kedaluwarsa (misalnya refresh di 80% durasi TTL) — memastikan data yang sangat populer ini nyaris tidak pernah benar-benar mengalami cache miss; (3) terapkan **singleflight** sebagai jaring pengaman terakhir untuk kasus di mana cache benar-benar miss (misalnya restart aplikasi, cache di-flush) — memastikan meski jutaan request datang bersamaan tepat di momen itu, hanya satu yang benar-benar query database; (4) untuk invalidasi eksplisit dari edit pengumuman darurat, pertimbangkan memicu refresh **segera** (bukan sekadar menghapus cache dan menunggu request berikutnya mengalami miss) — menjalankan refresh proaktif tepat saat invalidasi terjadi, sehingga request pertama setelah edit juga tidak perlu menunggu cache miss.
 
 ## Self-Check
 
-- Kenapa cache stampede bisa lebih parah dibanding kondisi tanpa cache sama sekali?
+- Kenapa cache stampede berbahaya meski total bebannya tidak lebih besar dari kondisi tanpa cache?
 - Bagaimana jitter, singleflight, dan refresh proaktif saling melengkapi dalam mencegah stampede?
 - Apa perbedaan titik refresh dan titik kedaluwarsa dalam stale-while-revalidate?
 - Kapan investasi refresh proaktif tidak sepadan diterapkan?
@@ -159,7 +171,8 @@ Refresh proaktif menambah kompleksitas kode yang signifikan (menyimpan dua times
 
 ## Further Reading
 
-- Materi umum industri mengenai "thundering herd problem" dan "stale-while-revalidate" (konsep yang juga dipakai luas di HTTP caching, RFC 5861).
+- RFC 5861, "HTTP Cache-Control Extensions for Stale Content" — definisi `stale-while-revalidate` di HTTP caching, konsep yang sama dengan refresh proaktif di note ini.
+- Andrea Vattani, Flavio Chierichetti, Keegan Lowenstein, "Optimal Probabilistic Cache Stampede Prevention" (PVLDB, 2015) — varian refresh proaktif yang memutuskan kapan me-refresh secara probabilistik, tanpa titik refresh tetap.
 
 ## Catatan Saya
 

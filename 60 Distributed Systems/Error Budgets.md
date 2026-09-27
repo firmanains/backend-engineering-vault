@@ -58,12 +58,12 @@ import "time"
 // kepanikan.
 type BudgetPolicy struct {
 	SLOTarget          float64 // misalnya 0.995
-	WindowDuration      time.Duration
-	FreezeThresholdPct float64 // di bawah ini, deploy fitur baru DIBEKUKAN otomatis
+	WindowDuration     time.Duration
+	FreezeThresholdPct float64 // di bawah ini, deploy fitur baru dibekukan otomatis
 }
 
 type BudgetStatus struct {
-	RemainingPercent float64
+	RemainingPercent     float64
 	ShouldFreezeReleases bool
 }
 
@@ -77,7 +77,7 @@ func (p BudgetPolicy) Evaluate(actualSuccessRate float64) BudgetStatus {
 	}
 
 	return BudgetStatus{
-		RemainingPercent:    remaining,
+		RemainingPercent:     remaining,
 		ShouldFreezeReleases: remaining < p.FreezeThresholdPct,
 	}
 }

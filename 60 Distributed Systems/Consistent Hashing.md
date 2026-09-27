@@ -57,11 +57,12 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"sort"
+	"strconv"
 )
 
 type Ring struct {
-	nodes       map[uint64]string // posisi di ring -> nama node
-	sortedKeys  []uint64
+	nodes               map[uint64]string // posisi di ring -> nama node
+	sortedKeys          []uint64
 	virtualNodesPerNode int
 }
 
@@ -81,7 +82,11 @@ func hashPosition(s string) uint64 {
 // distribusi jauh lebih merata dibanding satu posisi tunggal per node.
 func (r *Ring) AddNode(name string) {
 	for i := 0; i < r.virtualNodesPerNode; i++ {
-		pos := hashPosition(name + "#" + string(rune(i)))
+		// strconv.Itoa, BUKAN string(rune(i)): string(rune(i)) mengubah i
+		// jadi CODE POINT unicode (string(rune(0)) menghasilkan byte NUL,
+		// bukan karakter "0"), jebakan Go yang umum saat berniat mengubah
+		// angka jadi representasi desimalnya sebagai teks.
+		pos := hashPosition(name + "#" + strconv.Itoa(i))
 		r.nodes[pos] = name
 		r.sortedKeys = append(r.sortedKeys, pos)
 	}

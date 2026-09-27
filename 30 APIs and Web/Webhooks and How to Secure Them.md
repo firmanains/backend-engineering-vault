@@ -104,16 +104,25 @@ func VerifikasiSignature(payload []byte, timestampHeader, signatureDiterima stri
 	return hmac.Equal([]byte(signatureDihitung), []byte(signatureDiterima))
 }
 
+// Kejadian adalah satu notifikasi yang sudah lolos verifikasi, siap
+// diproses worker.
+type Kejadian struct {
+	ID      string
+	Payload []byte
+}
+
 // PenyimpanKejadian melacak ID kejadian yang sudah diproses, supaya webhook
 // yang dikirim ulang partner (baik karena timeout maupun karena partner
 // retry demi keandalan) tidak diproses dua kali.
 type PenyimpanKejadian interface {
 	SudahDiproses(ctx context.Context, idKejadian string) (bool, error)
-	TandaiDiproses(ctx context.Context, idKejadian string) error
 }
 
-func TanganiWebhook(antrean chan<- []byte, kejadian PenyimpanKejadian) http.HandlerFunc {
+const maxPayloadWebhook = 1 << 20 // 1 MB — endpoint publik, ukuran body wajib dibatasi
+
+func TanganiWebhook(antrean chan<- Kejadian, kejadian PenyimpanKejadian) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxPayloadWebhook)
 		payload, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "gagal baca body", http.StatusBadRequest)
@@ -128,6 +137,10 @@ func TanganiWebhook(antrean chan<- []byte, kejadian PenyimpanKejadian) http.Hand
 		}
 
 		idKejadian := r.Header.Get("X-Event-ID")
+		if idKejadian == "" {
+			http.Error(w, "X-Event-ID wajib ada", http.StatusBadRequest)
+			return
+		}
 		sudah, err := kejadian.SudahDiproses(r.Context(), idKejadian)
 		if err != nil {
 			http.Error(w, "kesalahan internal", http.StatusInternalServerError)
@@ -139,15 +152,16 @@ func TanganiWebhook(antrean chan<- []byte, kejadian PenyimpanKejadian) http.Hand
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		if err := kejadian.TandaiDiproses(r.Context(), idKejadian); err != nil {
-			http.Error(w, "kesalahan internal", http.StatusInternalServerError)
-			return
-		}
 
 		// RESPONS SEGERA setelah verifikasi — TIDAK menunggu pemrosesan
 		// berat selesai, mencegah partner timeout dan retry berulang.
+		// Penandaan "sudah diproses" SENGAJA tidak dilakukan di sini, tapi
+		// oleh worker SETELAH efek sampingnya benar-benar terjadi. Kalau
+		// ditandai lebih awal, kejadian yang gagal masuk antrean (atau hilang
+		// karena process crash) akan dianggap selesai, dan retry partner
+		// dijawab 200 tanpa pernah diproses.
 		select {
-		case antrean <- payload:
+		case antrean <- Kejadian{ID: idKejadian, Payload: payload}:
 			w.WriteHeader(http.StatusOK)
 		default:
 			// Antrean penuh: JANGAN balas 200. Balas 503 supaya partner
@@ -163,6 +177,8 @@ func TanganiWebhook(antrean chan<- []byte, kejadian PenyimpanKejadian) http.Hand
 ```
 
 Perhatikan bahwa jawaban yang benar di sini adalah **menolak dengan jujur**, bukan menerima lalu membuang. `503` memberi tahu partner untuk mengirim ulang; `200` yang palsu menghancurkan satu-satunya jaring pengaman yang tersedia. Kalau antrean in-memory sering penuh, itu sinyal bahwa antrean seharusnya durabel (database atau message broker) — bukan alasan untuk menaikkan ukuran channel.
+
+Channel in-memory juga punya kelemahan kedua yang tidak terlihat dari kode ini: kejadian yang sudah dibalas `200` tapi belum sempat diproses worker akan hilang kalau process mati (deploy, crash). Karena itu penandaan "sudah diproses" ada di worker, dan worker itu sendiri wajib idempotent, misalnya lewat unique constraint pada ID kejadian (lihat [[Idempotent Consumers]]). Dua pengiriman yang tiba nyaris bersamaan bisa sama-sama lolos pemeriksaan `SudahDiproses` di handler, jadi pemeriksaan di handler hanyalah optimasi, bukan jaminan.
 
 ## In His Stack
 

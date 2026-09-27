@@ -75,7 +75,11 @@ func handleAmbilDokumen(w http.ResponseWriter, r *http.Request) {
         http.Error(w, "kesalahan internal", http.StatusInternalServerError)
         return
     }
-    json.NewEncoder(w).Encode(doc)
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(doc); err != nil {
+        // Header sudah terkirim — yang tersisa hanya mencatatnya.
+        log.Printf("encode dokumen %s: %v", id, err)
+    }
 }
 ```
 
@@ -108,7 +112,7 @@ Membungkus error di setiap layer memberi jejak konteks yang berguna untuk debugg
 4. Desain terbuka: sebuah tim menemukan bahwa endpoint mereka selalu mengembalikan `500` untuk kasus yang seharusnya `404`, meski kode terlihat sudah memakai `errors.Is` dengan benar di handler. Rancang langkah investigasi sistematis untuk menemukan lapisan mana yang memutus rantai error, dan usulkan aturan tim (bisa lewat code review checklist atau linter) untuk mencegah bug ini terulang di masa depan.
 
 > [!success]- Kunci jawaban
-> Investigasi: telusuri setiap lapisan pemanggilan dari handler sampai ke titik error pertama kali dibuat, periksa satu per satu apakah setiap `fmt.Errorf` yang membungkus error di sepanjang jalan memakai `%w` atau `%v` — cukup satu lapisan yang salah memakai `%v` untuk memutus seluruh rantai di titik itu. Cara cepat memverifikasi: tulis unit test yang secara eksplisit memanggil `errors.Is` pada error yang dikembalikan dari titik masuk paling luar (misalnya langsung dari function repository/service, tanpa perlu HTTP), memverifikasi rantai tetap utuh sebelum menyentuh handler. Untuk mencegah ini terulang, tambahkan linter (`go vet` dengan check errors, atau linter komunitas seperti `wrapcheck`) di CI yang mendeteksi pemakaian `%v` pada value bertipe `error`, dan jadikan aturan eksplisit di code review checklist: "setiap error yang mungkin diperiksa lagi lewat errors.Is/As di lapisan atas WAJIB dibungkus dengan %w, tidak %v".
+> Investigasi: telusuri setiap lapisan pemanggilan dari handler sampai ke titik error pertama kali dibuat, periksa satu per satu apakah setiap `fmt.Errorf` yang membungkus error di sepanjang jalan memakai `%w` atau `%v` — cukup satu lapisan yang salah memakai `%v` untuk memutus seluruh rantai di titik itu. Cara cepat memverifikasi: tulis unit test yang secara eksplisit memanggil `errors.Is` pada error yang dikembalikan dari titik masuk paling luar (misalnya langsung dari function repository/service, tanpa perlu HTTP), memverifikasi rantai tetap utuh sebelum menyentuh handler. Untuk mencegah ini terulang, tambahkan linter di CI yang mendeteksi pemakaian `%v` pada value bertipe `error` di dalam `fmt.Errorf` (misalnya `errorlint`, tersedia lewat `golangci-lint`; `go vet` bawaan tidak memeriksa ini), dan jadikan aturan eksplisit di code review checklist: "setiap error yang mungkin diperiksa lagi lewat errors.Is/As di lapisan atas WAJIB dibungkus dengan %w, tidak %v".
 
 ## Self-Check
 

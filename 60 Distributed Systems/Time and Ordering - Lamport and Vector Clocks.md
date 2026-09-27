@@ -47,7 +47,7 @@ Vector clock menutup celah itu dengan menyimpan satu counter **per node**, bukan
 
 ## Under The Hood
 
-Poin krusial yang membedakan kedua mekanisme: Lamport clock memberi **urutan total** (setiap dua kejadian selalu bisa dibandingkan, salah satu "lebih kecil" dari yang lain) tapi urutan total ini **tidak selalu mencerminkan sebab-akibat sungguhan** — dua kejadian yang tidak berkaitan tetap dapat nomor yang berbeda dan terlihat "berurutan" meski sebenarnya independen. Vector clock memberi **urutan parsial** yang jujur: sebagian pasangan kejadian memang bisa dibandingkan (kalau salah satu benar-benar menyebabkan yang lain), tapi sebagian lain secara eksplisit ditandai sebagai "tidak bisa dibandingkan" (concurrent) — informasi yang lebih akurat, dengan harga struktur data yang lebih besar.
+Poin krusial yang membedakan kedua mekanisme: Lamport clock memberi **urutan total** (setiap dua kejadian selalu bisa dibandingkan; dua kejadian di node berbeda bisa saja punya counter yang sama, sehingga urutan totalnya dibentuk dengan pasangan `(counter, ID node)`, memakai ID node sebagai pemecah seri) tapi urutan total ini **tidak selalu mencerminkan sebab-akibat sungguhan** — dua kejadian yang tidak berkaitan tetap dapat nomor yang berbeda dan terlihat "berurutan" meski sebenarnya independen. Vector clock memberi **urutan parsial** yang jujur: sebagian pasangan kejadian memang bisa dibandingkan (kalau salah satu benar-benar menyebabkan yang lain), tapi sebagian lain secara eksplisit ditandai sebagai "tidak bisa dibandingkan" (concurrent) — informasi yang lebih akurat, dengan harga struktur data yang lebih besar.
 
 Biaya vector clock tumbuh linear dengan jumlah node dalam sistem — untuk sistem dengan ribuan node yang saling berkomunikasi, menyertakan vektor lengkap di setiap pesan menjadi mahal. Sistem production skala besar sering memakai varian yang lebih hemat (dotted version vector, atau membatasi vector clock hanya untuk node yang benar-benar relevan pada satu potongan data tertentu, bukan seluruh sistem) — detail optimasi yang di luar cakupan note ini, tapi penting diketahui ada trade-off nyata di sini, bukan solusi gratis.
 
@@ -58,6 +58,8 @@ package clocks
 
 // LamportClock: SATU counter, memberi urutan total tapi bisa
 // "berbohong" soal sebab-akibat untuk kejadian yang tidak berkaitan.
+// Contoh ini tidak aman dipakai banyak goroutine; versi nyata butuh
+// mutex atau atomic.
 type LamportClock struct {
 	counter int
 }
@@ -133,7 +135,7 @@ Untuk sistem dengan satu node saja, atau sistem terdistribusi kecil di mana kons
 
 > [!success]- Kunci jawaban
 > **1.** Jam sistem di setiap node, meski disinkronkan lewat NTP, selalu punya sedikit selisih (clock skew) yang tidak bisa dihilangkan sepenuhnya — selisih ini cukup untuk membuat kejadian yang sebenarnya terjadi lebih dulu terlihat memiliki timestamp lebih besar dari kejadian yang sebenarnya terjadi belakangan, membalik urutan sebab-akibat yang sesungguhnya.
-> **4.** Tambahkan header kustom (misalnya `X-Logical-Clock`) yang membawa counter Lamport, diteruskan bersama correlation ID di setiap panggilan HTTP antar tiga aplikasi ini. Setiap aplikasi menaikkan counter lokalnya untuk setiap kejadian yang dicatat, menyertakan nilai counter saat mengirim request ke aplikasi lain, dan saat menerima request, mengatur countернya jadi `max(counter lokal, counter yang diterima) + 1` sebelum melanjutkan. Log kemudian mencatat baik timestamp jam dinding (untuk pembacaan manusia) maupun counter logis ini (untuk pengurutan yang benar secara sebab-akibat) — saat menyusun ulang cerita lintas ketiga aplikasi, urutkan berdasarkan counter logis, bukan timestamp mentah, menjamin kejadian yang benar-benar menyebabkan kejadian lain selalu terlihat lebih dulu, terlepas dari clock skew antar server ketiga aplikasi itu.
+> **4.** Tambahkan header kustom (misalnya `X-Logical-Clock`) yang membawa counter Lamport, diteruskan bersama correlation ID di setiap panggilan HTTP antar tiga aplikasi ini. Setiap aplikasi menaikkan counter lokalnya untuk setiap kejadian yang dicatat, menyertakan nilai counter saat mengirim request ke aplikasi lain, dan saat menerima request, mengatur counter-nya jadi `max(counter lokal, counter yang diterima) + 1` sebelum melanjutkan. Log kemudian mencatat baik timestamp jam dinding (untuk pembacaan manusia) maupun counter logis ini (untuk pengurutan yang benar secara sebab-akibat) — saat menyusun ulang cerita lintas ketiga aplikasi, urutkan berdasarkan counter logis, bukan timestamp mentah, menjamin kejadian yang benar-benar menyebabkan kejadian lain selalu terlihat lebih dulu, terlepas dari clock skew antar server ketiga aplikasi itu.
 
 ## Self-Check
 

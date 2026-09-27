@@ -64,10 +64,15 @@ func main() {
 # eksplisit lewat flag -gcflags — sangat berguna untuk memverifikasi
 # asumsi tentang stack vs heap tanpa menebak.
 go build -gcflags="-m" main.go
-# Output akan menunjukkan baris seperti:
-# ./main.go:15:9: &d escapes to heap
-# ./main.go:9:2: n does not escape
+# Potongan output (Go 1.26) untuk kode di atas:
+# ./main.go:8:6: can inline TidakEscape
+# ./main.go:18:6: can inline Escape
+# ./main.go:19:2: moved to heap: d
+# ./main.go:24:25: 42 escapes to heap
+# ./main.go:25:22: (~r0).Nilai escapes to heap
 ```
+
+Tiga hal patut dicatat dari output asli ini. Pertama, pesan untuk variabel lokal yang dipaksa ke heap berbunyi `moved to heap: d`, bukan `&d escapes to heap`. Kedua, `n` di `TidakEscape` tidak disebut sama sekali: compiler tidak mencetak apa pun untuk nilai non-pointer yang tidak bermasalah. Ketiga, dua baris `escapes to heap` terakhir **bukan** berasal dari fungsi kita, melainkan dari `fmt.Println`. Argumennya bertipe `any`, dan mengubah `int` menjadi interface di sini memaksa nilainya dialokasikan di heap. Contoh ini sekaligus membuktikan poin tentang interface di bagian berikut. Nomor baris dan detail pesan bisa berbeda antar versi compiler, jadi selalu jalankan sendiri alih-alih menghafal bentuknya.
 
 ```mermaid
 flowchart TD

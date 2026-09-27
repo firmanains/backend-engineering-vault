@@ -56,46 +56,61 @@ package cache
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
-// InvalidasiEksplisit menunjukkan pola paling umum: fungsi yang MENGUBAH
-// data JUGA bertanggung jawab menghapus cache yang relevan, di titik
-// yang SAMA — disiplin yang harus dijaga di SETIAP tempat data ini bisa
-// berubah, tidak hanya satu tempat.
-func UbahStatusPermohonan(ctx context.Context, id int64, statusBaru string) error {
-	if err := simpanStatusKeDatabase(ctx, id, statusBaru); err != nil {
+// Store adalah abstraksi kecil atas database dan Redis.
+type Store interface {
+	SimpanStatus(ctx context.Context, id int64, status string) error
+	HapusCache(ctx context.Context, key string) error
+	// Incr menaikkan counter atomik di Redis (perintah INCR) dan
+	// mengembalikan nilai barunya.
+	Incr(ctx context.Context, key string) (int64, error)
+	// AmbilAngka membaca counter; nilai 0 kalau belum ada.
+	AmbilAngka(ctx context.Context, key string) (int64, error)
+}
+
+type Layanan struct {
+	store  Store
+	logger *slog.Logger
+}
+
+// UbahStatusPermohonan: fungsi yang mengubah data juga bertanggung jawab
+// menginvalidasi cache yang relevan, di titik yang sama. Disiplin ini
+// harus dijaga di setiap jalur yang bisa mengubah data tersebut.
+func (l *Layanan) UbahStatusPermohonan(ctx context.Context, id int64, statusBaru string) error {
+	if err := l.store.SimpanStatus(ctx, id, statusBaru); err != nil {
 		return fmt.Errorf("simpan status permohonan: %w", err)
 	}
 
-	// INVALIDASI EKSPLISIT — dipanggil TEPAT saat data berubah, tidak
-	// menunggu TTL alami habis.
-	hapusCache(fmt.Sprintf("permohonan:%d", id))
-	// Cache agregat yang mungkin terpengaruh (dashboard ringkasan status)
-	// SENGAJA TIDAK di-invalidate satu per satu di sini — terlalu banyak
-	// kemungkinan agregat yang terpengaruh; dibiarkan usang sampai TTL
-	// pendeknya sendiri habis, trade-off yang diterima sadar.
+	key := fmt.Sprintf("permohonan:%d", id)
+	if err := l.store.HapusCache(ctx, key); err != nil {
+		// Database sudah benar; cache bertahan paling lama sampai TTL-nya.
+		l.logger.Error("invalidasi cache gagal", "key", key, "error", err)
+	}
 
+	// Semua cache daftar dinaikkan versinya sekaligus (lihat KeyDaftar).
+	if _, err := l.store.Incr(ctx, "versi:daftar_permohonan"); err != nil {
+		l.logger.Error("naikkan versi cache daftar gagal", "error", err)
+	}
 	return nil
 }
 
-// VersioningTag menunjukkan pola versioning untuk invalidasi massal —
-// menaikkan versi berarti SELURUH cache lama dengan versi sebelumnya
-// otomatis tidak pernah diakses lagi, tanpa perlu menghapus satu per satu.
-type CacheVersion struct {
-	versiSaatIni int
+// KeyDaftar menyusun key cache daftar dengan menyertakan versi grup.
+// Versi disimpan di Redis, bukan di variabel Go: aplikasi berjalan di
+// banyak pod, dan counter di memori satu pod tidak diketahui pod lain.
+// Setelah Incr, semua key dengan versi lama tidak pernah dibaca lagi dan
+// akan hilang sendiri saat TTL-nya habis.
+func (l *Layanan) KeyDaftar(ctx context.Context, petugasID int64) (string, error) {
+	versi, err := l.store.AmbilAngka(ctx, "versi:daftar_permohonan")
+	if err != nil {
+		return "", fmt.Errorf("ambil versi cache daftar: %w", err)
+	}
+	return fmt.Sprintf("daftar_petugas:v%d:%d", versi, petugasID), nil
 }
-
-func (c *CacheVersion) KeyDenganVersi(kunciAsli string) string {
-	return fmt.Sprintf("v%d:%s", c.versiSaatIni, kunciAsli)
-}
-
-func (c *CacheVersion) NaikkanVersi() {
-	c.versiSaatIni++ // seluruh cache dengan versi lama jadi "tak terjangkau"
-}
-
-func simpanStatusKeDatabase(ctx context.Context, id int64, status string) error { return nil }
-func hapusCache(key string)                                                     {}
 ```
+
+Versioning membayar biayanya di sisi baca: setiap akses cache daftar kini butuh satu pembacaan tambahan ke Redis untuk mengetahui versi terkini. Ia juga membuang **semua** cache daftar sekaligus setiap kali satu permohonan berubah, jadi ia cocok untuk grup data yang dibaca jauh lebih sering daripada diubah.
 
 ## In His Stack
 
@@ -125,7 +140,7 @@ Invalidasi eksplisit memberi kesegaran data yang presisi tapi butuh disiplin yan
 
 > [!success]- Kunci jawaban
 > **1.** Kesulitan cache invalidation bukan soal teknik implementasi (menghapus entri cache secara teknis mudah), tapi soal **melacak dengan tepat** kapan dan entri mana saja yang perlu di-invalidate ketika data sumber berubah, terutama ketika data itu dipakai di banyak tempat berbeda (cache individual, cache agregat, cache lintas relasi) yang tidak selalu jelas hubungannya dari satu titik perubahan data. Melewatkan satu tempat berarti data usang yang tidak terdeteksi sampai seseorang melihat inkonsistensi secara langsung — kesalahan yang sifatnya "diam-diam", bukan error yang jelas terlihat.
-> **4.** Untuk cache detail (`permohonan:{id}`): invalidasi eksplisit langsung, karena key-nya diketahui pasti dari ID permohonan yang berubah. Untuk cache daftar per petugas: karena sulit melacak semua "daftar petugas" mana yang memuat permohonan ini (bisa berubah seiring riwayat penugasan), pendekatan yang lebih realistis adalah menerima **TTL pendek** untuk cache daftar ini (misalnya 1-2 menit) sebagai trade-off yang disengaja, alih-alih mencoba melacak invalidasi granular yang sempurna lintas semua kemungkinan daftar petugas yang terpengaruh. Kombinasi ini — invalidasi eksplisit presisi untuk data yang key-nya jelas, TTL pendek sebagai jaring pengaman untuk data agregat yang sulit dilacak semua dependensinya — adalah pola yang jauh lebih praktis dibanding mencoba mencapai invalidasi granular sempurna di semua tempat.
+> **4.** Untuk cache detail (`permohonan:{id}`): invalidasi eksplisit langsung, karena key-nya diketahui pasti dari ID permohonan yang berubah. Untuk cache daftar per petugas, periksa dulu apa yang sebenarnya diketahui pada saat perubahan terjadi. Biasanya kode yang mengubah status tahu petugas yang **sedang** menangani permohonan itu (dan, saat penugasan berpindah, petugas lama dan baru). Menghapus `daftar_petugas:{id}` untuk petugas-petugas itu menangani kasus yang paling sering terjadi. Untuk sisa kasus yang sulit dilacak (misalnya daftar yang menampilkan riwayat penugasan lama), terima **TTL pendek** (1–2 menit) sebagai jaring pengaman yang disengaja. Kalau perubahan status jarang dibanding pembacaan daftar, alternatifnya adalah versioning grup (satu versi untuk semua daftar), yang membuang semua cache daftar sekaligus tanpa perlu tahu petugas mana yang terdampak. Kombinasi invalidasi presisi untuk key yang jelas dan TTL untuk dependensi yang sulit dilacak jauh lebih praktis dibanding mengejar invalidasi granular yang sempurna.
 
 ## Self-Check
 

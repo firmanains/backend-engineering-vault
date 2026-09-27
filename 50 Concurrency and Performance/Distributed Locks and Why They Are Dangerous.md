@@ -56,10 +56,7 @@ Diagram ini menunjukkan persis skenario "The Problem" — jeda tak terduga (GC p
 
 **Kenapa `SETNX` sederhana di satu instance Redis tidak cukup untuk kasus yang benar-benar kritis**: bahkan tanpa masalah GC pause, satu instance Redis sendiri bisa gagal (crash, network partition). Kalau replikasi ke instance Redis lain belum sempat terjadi sebelum crash, lock yang "sudah diberikan" ke satu klien bisa hilang begitu Redis gagal-alih (failover) ke replica yang belum menerima informasi lock itu, membuka celah yang sama seperti skenario TTL habis. **Redlock** adalah algoritma yang diusulkan untuk mengatasi ini dengan meminta lock dari **mayoritas** node Redis independen. Tapi algoritma ini sendiri menjadi bahan perdebatan signifikan di komunitas (termasuk kritik terkenal dari Martin Kleppmann yang mempertanyakan asumsi soal clock dan waktu yang dipakai Redlock) tentang apakah ia benar-benar memberi jaminan yang diklaim dalam semua kondisi kegagalan yang mungkin terjadi.
 
-> [!question] Perlu diverifikasi
-> Klaim: detail spesifik algoritma Redlock dan isi kritik Kleppmann terhadapnya.
-> Kenapa ragu: ini adalah perdebatan teknis yang cukup mendalam dan berkelanjutan dalam komunitas distributed systems; ringkasan singkat di sini tidak boleh dianggap representasi lengkap dari argumen kedua belah pihak.
-> Cara verifikasi: baca langsung artikel asli Martin Kleppmann "How to do distributed locking" dan tanggapan resmi dari tim Redis (antirez) sebagai kedua sisi argumen.
+Inti perdebatannya bisa diringkas tanpa mengambil sisi. Kritik Kleppmann ("How to do distributed locking", 2016) berpegang pada dua hal. Pertama, keamanan Redlock bergantung pada asumsi waktu: delay jaringan, pause proses, dan selisih jam antar mesin yang dianggap terbatas, padahal asumsi itu bisa dilanggar di sistem nyata. Kedua, Redlock tidak menghasilkan fencing token, sehingga tidak ada cara bagi sistem penerima untuk menolak pemegang lock yang sudah kedaluwarsa. Tanggapan antirez ("Is Redlock safe?", 2016) berargumen bahwa asumsi waktu itu masuk akal dalam praktik dan bahwa sebagian skenario kritik juga memengaruhi sistem lock lain. Kesimpulan yang aman untuk vault ini: kalau kebenaran sistem bergantung pada lock itu, pakai fencing token dan penyimpanan yang memeriksanya, apa pun algoritma lock-nya.
 
 ## In Go
 
@@ -68,51 +65,80 @@ package distlock
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// PerolehLockDenganFencingToken menunjukkan pola fencing token —
-// setiap lock yang berhasil diperoleh disertai nomor urut yang SELALU
-// NAIK, yang harus diperiksa sistem penerima operasi (bukan hanya
-// dipercaya oleh pemegang lock itu sendiri).
-func PerolehLockDenganFencingToken(ctx context.Context, rdb *redis.Client, lockKey string, ttl time.Duration) (int64, error) {
-	// INCR pada counter terpisah SELALU naik, terlepas dari lock itu
-	// sendiri berhasil diperoleh atau tidak — dipakai SEBAGAI fencing token.
+var ErrLockDipegangLain = errors.New("lock sedang dipegang instance lain")
+
+// PerolehLock mengambil lock dengan fencing token. INCR selalu naik, jadi
+// setiap pemegang lock baru mendapat token yang lebih besar dari semua
+// pemegang sebelumnya. Token juga disimpan sebagai nilai lock, dan dipakai
+// untuk melepas lock secara bersyarat.
+func PerolehLock(ctx context.Context, rdb *redis.Client, lockKey string, ttl time.Duration) (int64, error) {
 	token, err := rdb.Incr(ctx, lockKey+":token").Result()
 	if err != nil {
 		return 0, fmt.Errorf("increment fencing token: %w", err)
 	}
-
-	sukses, err := rdb.SetNX(ctx, lockKey, token, ttl).Result()
+	ok, err := rdb.SetNX(ctx, lockKey, token, ttl).Result()
 	if err != nil {
 		return 0, fmt.Errorf("set lock: %w", err)
 	}
-	if !sukses {
-		return 0, fmt.Errorf("lock sedang dipegang instance lain")
+	if !ok {
+		return 0, ErrLockDipegangLain
 	}
-
 	return token, nil
 }
 
-// TulisDenganFencingToken menunjukkan bagaimana sistem PENERIMA operasi
-// (bukan pemegang lock) harus menolak token yang lebih lama — ini yang
-// benar-benar mencegah kerusakan data, BUKAN sekadar mempercayai
-// pemegang lock "pasti" satu-satunya yang aktif.
-func TulisDenganFencingToken(ctx context.Context, tokenTerakhirTersimpan *int64, tokenBaru int64, data string) error {
-	// <=, bukan < — token yang SAMA persis dengan yang terakhir tersimpan
-	// berarti pemegang lock lama mencoba menulis lagi (misalnya request
-	// yang tertunda), dan itu justru kasus yang harus ditolak juga.
-	if tokenBaru <= *tokenTerakhirTersimpan {
-		return fmt.Errorf("fencing token %d sudah usang, token terakhir %d — operasi DITOLAK", tokenBaru, *tokenTerakhirTersimpan)
+// skripLepas menghapus lock hanya kalau nilainya masih token milik
+// pemanggil. GET lalu DEL sebagai dua perintah terpisah tidak aman: di
+// antara keduanya, lock bisa kedaluwarsa dan diambil instance lain.
+var skripLepas = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+end
+return 0`)
+
+// LepasLock melepas lock hanya kalau masih dipegang token ini.
+func LepasLock(ctx context.Context, rdb *redis.Client, lockKey string, token int64) error {
+	if err := skripLepas.Run(ctx, rdb, []string{lockKey}, token).Err(); err != nil {
+		return fmt.Errorf("lepas lock: %w", err)
 	}
-	*tokenTerakhirTersimpan = tokenBaru
-	// ... simpan data ...
+	return nil
+}
+
+var ErrTokenUsang = errors.New("fencing token usang, operasi ditolak")
+
+// TulisDenganFencingToken adalah sisi PENERIMA: penyimpanan menolak tulisan
+// dari token yang lebih kecil dari token terbesar yang pernah diterimanya.
+// Pemeriksaan dan penulisan terjadi dalam satu UPDATE bersyarat, sehingga
+// atomik. Token yang sama diterima (pemegang lock yang sama boleh menulis
+// berkali-kali); hanya token yang lebih kecil yang ditolak.
+func TulisDenganFencingToken(ctx context.Context, db *sql.DB, laporanID, token int64, isi string) error {
+	res, err := db.ExecContext(ctx, `
+		UPDATE laporan
+		SET isi = ?, token_terakhir = ?
+		WHERE id = ? AND token_terakhir <= ?`,
+		isi, token, laporanID, token)
+	if err != nil {
+		return fmt.Errorf("tulis laporan %d: %w", laporanID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("periksa hasil tulis laporan %d: %w", laporanID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("laporan %d, token %d: %w", laporanID, token, ErrTokenUsang)
+	}
 	return nil
 }
 ```
+
+Satu nuansa MySQL/MariaDB pada kode ini: `RowsAffected` secara default menghitung baris yang **berubah**, bukan yang cocok dengan `WHERE`. Kalau pemegang lock yang sama menulis isi yang persis sama dua kali, penulisan kedua melaporkan 0 baris dan keliru dianggap token usang. Set opsi `clientFoundRows=true` di DSN go-sql-driver/mysql supaya yang dihitung adalah baris yang cocok.
 
 ## In His Stack
 
@@ -137,12 +163,12 @@ Distributed lock berbasis Redis sederhana cukup untuk kasus yang **toleran terha
 
 1. Jelaskan skenario konkret di mana TTL lock yang "cukup lama" tetap bisa menyebabkan dua proses memegang lock yang sama secara bersamaan.
 2. Bagaimana fencing token mencegah kerusakan data meski celah TTL lock tetap terjadi?
-3. Kenapa sistem yang menerima operasi (bukan hanya pemegang lock) harus memeriksa fencing token, bukan mempercayai pemegang lock begitu saja?
+3. Kenapa sistem yang menerima operasi (bukan hanya pemegang lock) harus memeriksa fencing token, dan kenapa token yang **sama** dengan token terakhir tetap harus diterima?
 4. Desain terbuka: timmu perlu memastikan sebuah job migrasi data besar (butuh waktu bervariasi, dari beberapa menit sampai beberapa jam tergantung volume data) hanya berjalan di satu instance pada satu waktu, dan kegagalan karena duplikasi (dua instance menjalankan migrasi yang sama bersamaan) akan merusak data secara serius. Jelaskan kenapa distributed lock berbasis Redis sederhana (tanpa fencing token) berisiko untuk kasus ini, dan rancang pendekatan alternatif yang lebih aman.
 
 > [!success]- Kunci jawaban
 > **1.** Proses yang memegang lock bisa mengalami jeda tak terduga yang tidak berkaitan dengan logika bisnisnya sama sekali — GC pause pada aplikasi Go (lihat [[Garbage Collection in Go]]), network partition sesaat, atau node Kubernetes yang mengalami tekanan resource tinggi dan memperlambat seluruh proses di dalamnya. Jeda ini bisa terjadi kapan saja dan berdurasi tidak terduga, membuat **tidak ada** angka TTL yang benar-benar "pasti aman" — TTL yang cukup lama untuk kondisi normal tetap bisa terlampaui oleh jeda yang cukup ekstrem, membuka celah yang sama.
-> **4.** Distributed lock sederhana berisiko karena durasi migrasi yang **sangat bervariasi** (menit sampai jam) membuat menentukan TTL yang aman menjadi sangat sulit. TTL yang cukup panjang untuk volume data terbesar berarti kalau instance yang memegang lock benar-benar crash (bukan sekadar jeda), lock itu akan macet dalam waktu yang sangat lama sebelum ada instance lain yang bisa mengambil alih. Pendekatan yang lebih aman: gunakan **locking di level database** yang menjadi sasaran migrasi itu sendiri. Misalnya, baris "status migrasi" yang di-lock lewat `SELECT ... FOR UPDATE` (lihat [[../40 Databases/Locking and Row Locks|Locking and Row Locks]]) dalam transaction yang **tetap terbuka selama migrasi berjalan** (bukan lock terpisah dengan TTL independen). Kalau instance yang menjalankan migrasi benar-benar crash, koneksi database-nya akan terputus dan lock itu otomatis dilepas oleh database itu sendiri (bukan menunggu TTL buatan yang terpisah dari kondisi sesungguhnya proses itu masih hidup atau tidak) — sinyal yang jauh lebih akurat dibanding TTL yang ditebak di awal tanpa tahu durasi sesungguhnya migrasi akan berjalan.
+> **4.** Distributed lock sederhana berisiko karena durasi migrasi yang **sangat bervariasi** (menit sampai jam) membuat TTL yang aman mustahil ditentukan: TTL pendek bisa habis di tengah migrasi, TTL panjang membuat lock macet berjam-jam kalau pemegangnya crash. Pendekatan yang lebih aman adalah lock yang umurnya terikat pada **koneksi database**, bukan pada TTL tebakan. MariaDB/MySQL menyediakan named lock `GET_LOCK('migrasi_data', 0)` dan PostgreSQL menyediakan `pg_advisory_lock`; keduanya otomatis dilepas begitu sesi database pemegangnya terputus, termasuk saat proses crash. Di Go, ambil lock ini lewat satu koneksi khusus (`db.Conn(ctx)`), karena `*sql.DB` bisa menjalankan setiap query di koneksi berbeda dari pool. Jangan menahan satu **transaction** terbuka selama berjam-jam sebagai gantinya (misalnya `SELECT ... FOR UPDATE` yang tidak di-commit): transaction panjang menahan pembersihan versi lama di [[../40 Databases/MVCC|MVCC]] dan membengkakkan undo log atau tabel. Lock yang terikat sesi pun tidak sempurna: kalau koneksinya putus di tengah migrasi, instance lain bisa mulai sementara instance pertama mungkin masih berjalan. Karena itu migrasinya sendiri sebaiknya dirancang bisa dilanjutkan (menyimpan checkpoint) dan setiap batch tulisannya memeriksa bahwa pemegang lock masih sama, pola yang sama dengan fencing token.
 
 ## Self-Check
 
@@ -161,8 +187,9 @@ Distributed lock berbasis Redis sederhana cukup untuk kasus yang **toleran terha
 
 ## Further Reading
 
-- Martin Kleppmann, "How to do distributed locking" — kritik mendalam terhadap algoritma Redlock dan asumsi soal waktu dalam sistem terdistribusi.
-- Dokumentasi resmi Redis mengenai Redlock, sebagai sisi argumen lain dari perdebatan ini.
+- Martin Kleppmann, "How to do distributed locking" (2016) — kritik terhadap Redlock dan asal gagasan fencing token.
+- Salvatore Sanfilippo (antirez), "Is Redlock safe?" (2016) — tanggapan dari pembuat Redis, sisi lain dari perdebatan ini.
+- Dokumentasi resmi Redis mengenai distributed lock dan Redlock.
 
 ## Catatan Saya
 

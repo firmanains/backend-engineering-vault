@@ -40,10 +40,12 @@ Analogi ini bocor terutama pada **Consistency**: istilah "consistency" di ACID *
 
 | Jaminan | Menjawab kegagalan | Mekanisme umum |
 |---|---|---|
-| Atomicity | Kegagalan di tengah proses (crash, error) | Write-ahead log — perubahan dicatat dulu sebelum diterapkan permanen, memungkinkan rollback. |
-| Consistency | Transaction yang menghasilkan data melanggar aturan | Constraint (`CHECK`, `FOREIGN KEY`, `UNIQUE`) diperiksa sebelum `COMMIT` diizinkan berhasil. |
+| Atomicity | Kegagalan di tengah proses (crash, error) | Versi lama data disimpan supaya perubahan bisa dibatalkan: undo log di InnoDB, versi baris lama di PostgreSQL. Setelah crash, log dipakai untuk menyelesaikan atau membatalkan transaction yang belum tuntas. |
+| Consistency | Transaction yang menghasilkan data melanggar aturan | Constraint (`CHECK`, `FOREIGN KEY`, `UNIQUE`). Di MySQL/MariaDB diperiksa per statement; PostgreSQL juga mendukung constraint `DEFERRABLE` yang baru diperiksa saat `COMMIT`. |
 | Isolation | Transaction lain "mengintip" perubahan yang belum final | Locking dan/atau [[MVCC]] (Multi-Version Concurrency Control, level intermediate). |
-| Durability | Kehilangan data setelah `COMMIT` karena crash | Data yang di-`COMMIT` ditulis ke disk (bukan hanya memori) sebelum `COMMIT` dianggap berhasil. |
+| Durability | Kehilangan data setelah `COMMIT` karena crash | **Log** perubahan (redo log InnoDB, WAL PostgreSQL) di-flush ke disk sebelum `COMMIT` dilaporkan berhasil. Halaman data tabelnya sendiri boleh ditulis belakangan, karena bisa dibangun ulang dari log. |
+
+Durability juga bisa dilonggarkan lewat konfigurasi demi kecepatan, misalnya `innodb_flush_log_at_trx_commit` di MariaDB atau `synchronous_commit` di PostgreSQL. Dengan setelan longgar, `COMMIT` bisa dilaporkan berhasil sebelum log benar-benar sampai ke disk, dan crash sesaat setelahnya bisa menghilangkan transaction terakhir. Periksa setelan ini di server produksi sebelum mengasumsikan durability penuh.
 
 Poin penting: keempat jaminan ini **bekerja bersama** tapi menjawab pertanyaan yang berbeda. Sebuah sistem bisa saja atomik (tidak ada state setengah jadi) tapi tidak durable (data hilang kalau server mati sebelum ditulis ke disk) — dua properti yang independen secara konsep, meski database relasional matang seperti MariaDB/PostgreSQL menjamin keduanya sekaligus untuk transaction yang sudah `COMMIT`.
 
@@ -57,11 +59,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/go-sql-driver/mysql"
 )
 
+// Nomor error MySQL/MariaDB untuk foreign key yang menunjuk baris
+// yang tidak ada (ER_NO_REFERENCED_ROW_2).
+const errFKTidakAda = 1452
+
 // BuatPermohonan menunjukkan bagaimana Consistency (constraint database)
-// dan Atomicity (transaction) bekerja bersama: kalau constraint dilanggar,
-// database menolak COMMIT, dan seluruh transaction otomatis batal.
+// dan Atomicity (transaction) bekerja bersama: statement yang melanggar
+// constraint ditolak, dan transaction yang gagal tidak meninggalkan
+// perubahan apa pun.
 func BuatPermohonan(ctx context.Context, db *sql.DB, instansiID int, judul string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -73,12 +82,12 @@ func BuatPermohonan(ctx context.Context, db *sql.DB, instansiID int, judul strin
 		INSERT INTO permohonan (instansi_id, judul, status) VALUES (?, ?, 'diajukan')
 	`, instansiID, judul)
 	if err != nil {
-		// Kalau instansi_id melanggar FOREIGN KEY (instansi tidak ada),
-		// database menolak INSERT ini — Consistency ditegakkan di sini,
-		// dan Atomicity memastikan tidak ada perubahan lain yang "bocor".
-		var mysqlErr interface{ Number() uint16 }
-		if errors.As(err, &mysqlErr) {
-			return fmt.Errorf("permohonan melanggar constraint database: %w", err)
+		// Di MySQL/MariaDB, constraint diperiksa saat statement dijalankan
+		// (bukan ditunda sampai COMMIT). Kalau instansi_id tidak ada,
+		// INSERT ini sendiri yang ditolak.
+		var mysqlErr *mysql.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == errFKTidakAda {
+			return fmt.Errorf("instansi %d tidak ada: %w", instansiID, err)
 		}
 		return fmt.Errorf("insert permohonan: %w", err)
 	}

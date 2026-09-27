@@ -20,7 +20,7 @@ created: 2026-08-02
 
 Sebuah service di sistem legal-services menerima event dari Kafka dan memproses setiap event dengan memanggil layanan OCR eksternal yang lambat — sekitar dua detik per dokumen. Producer mengirim event jauh lebih cepat dari itu, terutama menjelang tenggat waktu layanan tahunan ketika ribuan permohonan masuk dalam hitungan menit. Consumer menampung pesan yang belum sempat diproses di dalam channel Go internal dengan buffer besar, dengan asumsi "buffer besar berarti aman dari kehilangan pesan".
 
-Asumsi ini keliru dua arah. Kalau buffer memang besar tapi terbatas, dan laju masuk terus melebihi laju keluar, buffer itu pada akhirnya tetap penuh — pertanyaannya hanya kapan, bukan apakah. Kalau buffer dibuat "tidak terbatas" (channel unbuffered yang ditampung lewat goroutine penerima tanpa batas, atau struktur data yang terus tumbuh), memori service itu terus naik sampai proses itu sendiri di-kill oleh out-of-memory killer Kubernetes — bukan gagal dengan pesan error yang jelas, tapi mati mendadak tanpa peringatan, membawa serta seluruh pekerjaan yang sedang ditampung di buffer itu, hilang tanpa jejak.
+Asumsi ini keliru dua arah. Kalau buffer memang besar tapi terbatas, dan laju masuk terus melebihi laju keluar, buffer itu pada akhirnya tetap penuh — pertanyaannya hanya kapan, bukan apakah. Kalau buffer dibuat "tidak terbatas" (misalnya men-spawn satu goroutine baru untuk setiap pesan yang menunggu, atau menampung pesan di slice yang terus tumbuh), memori service itu terus naik sampai proses itu sendiri di-kill oleh out-of-memory killer Kubernetes — bukan gagal dengan pesan error yang jelas, tapi mati mendadak tanpa peringatan, membawa serta seluruh pekerjaan yang sedang ditampung di buffer itu, hilang tanpa jejak.
 
 ## Intuition
 
@@ -65,6 +65,12 @@ import (
 const kapasitasBuffer = 100
 
 func jalankanPipelineDenganBackpressure(ctx context.Context, sumberEvent <-chan Event) error {
+	// cancel memastikan goroutine pengisi di bawah ikut berhenti kalau
+	// function ini keluar lebih awal karena error; tanpa ini, goroutine
+	// itu bisa tertahan selamanya di `antrean <- event` (goroutine leak).
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Channel buffered dengan kapasitas terbatas adalah backpressure
 	// paling sederhana: begitu penuh, pengirim otomatis diblokir.
 	antrean := make(chan Event, kapasitasBuffer)
@@ -103,7 +109,7 @@ Backpressure yang ketat (menolak request begitu kapasitas penuh) berarti sebagia
 ## Common Mistakes
 
 > [!warning] Jebakan
-> Memakai channel Go unbuffered besar atau slice yang terus di-append sebagai "buffer aman", padahal keduanya tetap dibatasi oleh memori yang tersedia — begitu laju masuk melebihi laju keluar dalam jangka panjang, sistem akan tetap kehabisan memori, hanya lebih lambat terlihat dibanding buffer kecil.
+> Memakai channel Go dengan buffer sangat besar atau slice yang terus di-append sebagai "buffer aman", padahal keduanya tetap dibatasi oleh memori yang tersedia — begitu laju masuk melebihi laju keluar dalam jangka panjang, sistem akan tetap kehabisan memori, hanya lebih lambat terlihat dibanding buffer kecil.
 
 > [!warning] Jebakan
 > Menerapkan backpressure hanya di satu lapisan sistem (misalnya consumer internal) tanpa meneruskan sinyalnya ke lapisan sebelumnya (producer, atau client yang memanggil API) — lapisan yang tidak menerima sinyal itu tetap mengirim secepat mungkin, memindahkan masalah ke lapisan yang menampung, bukan menyelesaikannya.

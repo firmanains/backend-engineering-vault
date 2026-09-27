@@ -89,11 +89,18 @@ func contohProyeksiLonjakan() {
 		"api-partner-nik": 800 * time.Millisecond, // JAUH lebih lambat dari komponen lain
 	}
 
+	// Catatan: memakai λ yang sama untuk semua komponen hanya benar kalau
+	// setiap request memanggil setiap komponen tepat sekali. Request yang
+	// menjalankan tiga query berarti λ database tiga kali lipat.
 	kebutuhan := HitungKebutuhanPerKomponen(1000, waktuProses)
 	// Hasil akan menunjukkan komponen "api-partner-nik" butuh konkurensi
 	// JAUH lebih tinggi (800) dibanding aplikasi (50) atau database (30) —
 	// bottleneck yang jelas terlihat dari perhitungan ini, BUKAN dari
 	// menambah instance aplikasi yang tidak menyentuh masalah sesungguhnya.
+	// Konkurensi juga bukan satu-satunya batas: kalau partner membatasi
+	// 100 request/detik, laju 1000/detik ke partner mustahil dipenuhi
+	// berapa pun konkurensinya, dan desainnya harus berubah (cache hasil
+	// verifikasi, antrean, atau kesepakatan kuota baru dengan partner).
 	_ = kebutuhan
 }
 ```
@@ -145,7 +152,7 @@ Capacity planning yang sangat detail dan formal butuh waktu dan usaha nyata — 
 
 ## Further Reading
 
-- Materi capacity planning dari praktik SRE (Site Reliability Engineering) yang dipublikasikan luas oleh berbagai perusahaan teknologi besar sebagai studi kasus umum (bukan rujukan spesifik satu sumber tunggal).
+- Betsy Beyer, Chris Jones, Jennifer Petoff, Niall Richard Murphy (ed.), *Site Reliability Engineering* (O'Reilly, 2016) — buku SRE Google, yang membahas perencanaan kapasitas sebagai bagian dari praktik reliability; tersedia gratis di situs resmi Google SRE.
 
 ## Catatan Saya
 

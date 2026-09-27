@@ -14,7 +14,7 @@ created: 2026-07-29
 
 ## TL;DR
 
-Deadlock terjadi ketika dua (atau lebih) transaction saling menunggu lock yang dipegang satu sama lain — Transaction A menahan lock pada Baris 1 dan menunggu lock pada Baris 2, sementara Transaction B menahan lock pada Baris 2 dan menunggu lock pada Baris 1. Tidak satu pun bisa lanjut, dan tidak satu pun akan pernah bisa lanjut tanpa intervensi. Inilah kenapa database tidak membiarkan situasi ini berlangsung selamanya: ia secara aktif mendeteksi siklus tunggu-menunggu ini dan **memaksa membatalkan** salah satu transaction (dipilih lewat heuristik seperti "transaction termuda" atau "transaction dengan lock paling sedikit"), melepaskan lock-nya supaya transaction lain bisa lanjut. Deadlock bukan bug database — ia adalah konsekuensi tak terhindarkan dari locking konkuren, dan penyebabnya hampir selalu ada di kode aplikasi: urutan mengunci baris yang tidak konsisten antar transaction berbeda.
+Deadlock terjadi ketika dua (atau lebih) transaction saling menunggu lock yang dipegang satu sama lain — Transaction A menahan lock pada Baris 1 dan menunggu lock pada Baris 2, sementara Transaction B menahan lock pada Baris 2 dan menunggu lock pada Baris 1. Tidak satu pun bisa lanjut, dan tidak satu pun akan pernah bisa lanjut tanpa intervensi. Inilah kenapa database tidak membiarkan situasi ini berlangsung selamanya: ia secara aktif mendeteksi siklus tunggu-menunggu ini dan **memaksa membatalkan** salah satu transaction, melepaskan lock-nya supaya transaction lain bisa lanjut. Deadlock bukan bug database — ia adalah konsekuensi tak terhindarkan dari locking konkuren, dan penyebabnya hampir selalu ada di kode aplikasi: urutan mengunci baris yang tidak konsisten antar transaction berbeda.
 
 ## The Problem
 
@@ -40,15 +40,15 @@ flowchart LR
 
 Diagram ini menunjukkan siklus tunggu-menunggu klasik: `Transaction A` menunggu sesuatu yang dipegang `Transaction B`, dan `Transaction B` menunggu sesuatu yang dipegang `Transaction A` — sebuah siklus tertutup dalam graf ketergantungan yang, kalau dibiarkan, tidak akan pernah terselesaikan sendiri.
 
-Baik MySQL/InnoDB maupun PostgreSQL menjalankan **deadlock detector** yang berjalan berkala memeriksa graf tunggu-menunggu ini. Begitu siklus terdeteksi, satu transaction dipilih sebagai "korban" (biasanya yang paling murah dibatalkan, misalnya yang paling sedikit mengubah data atau yang paling baru dimulai) dan dipaksa `ROLLBACK` secara otomatis oleh database, mengembalikan error spesifik ke aplikasi (`Error 1213: Deadlock found` di MySQL, kode SQLSTATE `40P01` di PostgreSQL). Transaction yang menang melanjutkan seperti biasa begitu lock yang ditunggunya dilepas oleh korban yang dibatalkan.
+Baik MySQL/InnoDB maupun PostgreSQL menjalankan **deadlock detector** yang memeriksa graf tunggu-menunggu ini, dengan waktu dan cara memilih korban yang berbeda. InnoDB memeriksa graf setiap kali sebuah transaction mulai menunggu lock, lalu membatalkan transaction yang lebih "kecil" (yang menyisipkan, mengubah, atau menghapus lebih sedikit baris). PostgreSQL baru memeriksa setelah sebuah transaction menunggu selama `deadlock_timeout` (default satu detik), dan transaction yang menjalankan pemeriksaan itulah yang biasanya dibatalkan. Korban dipaksa `ROLLBACK` secara otomatis oleh database, mengembalikan error spesifik ke aplikasi (`Error 1213: Deadlock found` di MySQL, kode SQLSTATE `40P01` di PostgreSQL). Transaction yang menang melanjutkan seperti biasa begitu lock yang ditunggunya dilepas oleh korban yang dibatalkan.
 
 **Kenapa urutan locking yang konsisten menghilangkan deadlock**: kalau **setiap** transaction di seluruh aplikasi selalu mengunci baris dalam urutan yang sama (misalnya selalu berdasarkan `id` rekening yang lebih kecil dulu, tanpa peduli mana yang "sumber" dan mana yang "tujuan" transfer), siklus tunggu-menunggu secara matematis tidak mungkin terbentuk. Transaction yang mengunci baris dengan `id` lebih kecil lebih dulu tidak akan pernah menunggu transaction lain yang juga mengikuti urutan yang sama, karena keduanya "antre" dalam arah yang identik.
 
 ## Under The Hood
 
-Selain deadlock lock murni (dua transaction saling menunggu row lock), ada bentuk lain yang kurang jelas: **lock queue starvation** dan **deadlock yang melibatkan gap lock** (di InnoDB, terkait next-key locking yang disinggung di [[Locking and Row Locks]]). Dua transaction yang masing-masing menyisipkan baris baru ke rentang yang tumpang tindih bisa saling menunggu gap lock satu sama lain — sebuah bentuk deadlock yang tidak melibatkan baris yang sudah ada sama sekali, murni soal celah (gap) di antara baris-baris index. Ini salah satu alasan kenapa deadlock bisa terasa "muncul entah dari mana" pada operasi `INSERT` yang terlihat independen satu sama lain di permukaan.
+Selain deadlock lock murni (dua transaction saling menunggu row lock), ada bentuk yang kurang jelas: **deadlock yang melibatkan gap lock** (di InnoDB, terkait next-key locking yang disinggung di [[Locking and Row Locks]]). Dua transaction yang masing-masing menyisipkan baris baru ke rentang yang tumpang tindih bisa saling menunggu gap lock satu sama lain — sebuah bentuk deadlock yang tidak melibatkan baris yang sudah ada sama sekali, murni soal celah (gap) di antara baris-baris index. Ini salah satu alasan kenapa deadlock bisa terasa "muncul entah dari mana" pada operasi `INSERT` yang terlihat independen satu sama lain di permukaan.
 
-Deadlock timeout (parameter seperti `innodb_lock_wait_timeout` di MySQL) adalah mekanisme **terpisah** dari deadlock detector. Timeout menangani kasus transaction yang menunggu lock terlalu lama (mungkin karena transaction lain yang menahan lock itu sedang lambat karena alasan lain, bukan karena deadlock sungguhan), sementara deadlock detector secara spesifik mencari **siklus** tunggu-menunggu. Keduanya bisa sama-sama menyebabkan transaction gagal, tapi dengan pesan error dan penyebab akar yang berbeda — penting dibedakan saat mendiagnosis mengapa sebuah transaction gagal.
+Lock wait timeout (`innodb_lock_wait_timeout` di MySQL/MariaDB, `lock_timeout` di PostgreSQL) adalah mekanisme **terpisah** dari deadlock detector. Timeout menangani kasus transaction yang menunggu lock terlalu lama (mungkin karena transaction lain yang menahan lock itu sedang lambat karena alasan lain, bukan karena deadlock sungguhan), sementara deadlock detector secara spesifik mencari **siklus** tunggu-menunggu. Keduanya bisa sama-sama menyebabkan transaction gagal, tapi dengan pesan error dan penyebab akar yang berbeda. Ada jebakan khusus di InnoDB: secara default, lock wait timeout (error 1205) hanya membatalkan **statement** yang menunggu, bukan seluruh transaction. Transaction tetap terbuka dengan perubahan sebelumnya masih utuh, dan aplikasi yang langsung melanjutkan ke statement berikutnya akan melakukan commit atas setengah pekerjaan. Deadlock (error 1213), sebaliknya, selalu membatalkan seluruh transaction korban.
 
 ## In Go
 
@@ -60,15 +60,21 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
-// TransferSaldo SELALU mengunci baris berdasarkan urutan id yang lebih kecil
-// dulu, TERLEPAS dari mana yang menjadi sumber dan mana yang tujuan transfer
-// secara bisnis — ini yang menghilangkan kemungkinan deadlock antar dua
-// transfer berlawanan arah (A ke B dan B ke A) yang berjalan bersamaan.
-func TransferSaldo(ctx context.Context, db *sql.DB, idSumber, idTujuan int64, jumlah int64) error {
+const (
+	errMySQLLockWaitTimeout = 1205
+	errMySQLDeadlock        = 1213
+)
+
+// TransferSaldo selalu mengunci baris berdasarkan urutan id yang lebih kecil
+// dulu, terlepas dari mana yang menjadi sumber dan mana yang tujuan transfer
+// secara bisnis. Ini menghilangkan kemungkinan deadlock antar dua transfer
+// berlawanan arah (A ke B dan B ke A) yang berjalan bersamaan.
+func TransferSaldo(ctx context.Context, db *sql.DB, idSumber, idTujuan, jumlah int64) error {
 	idPertama, idKedua := idSumber, idTujuan
 	if idPertama > idKedua {
 		idPertama, idKedua = idKedua, idPertama
@@ -80,14 +86,18 @@ func TransferSaldo(ctx context.Context, db *sql.DB, idSumber, idTujuan int64, ju
 		if err == nil {
 			return nil
 		}
-		if !errDeadlock(err) {
+		if !layakDiulang(err) {
 			return fmt.Errorf("transfer saldo: %w", err)
 		}
-		// Deadlock terdeteksi database — ini BUKAN bug logika, ini sinyal
-		// untuk mengulang transaction dari awal setelah jeda singkat.
-		time.Sleep(time.Duration(percobaan) * 20 * time.Millisecond)
+		// Deadlock bukan bug logika. Ini sinyal untuk mengulang transaction
+		// dari awal setelah jeda singkat, tetap menghormati ctx.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("transfer saldo dibatalkan: %w", ctx.Err())
+		case <-time.After(time.Duration(percobaan) * 20 * time.Millisecond):
+		}
 	}
-	return fmt.Errorf("transfer saldo gagal setelah %d percobaan akibat deadlock berulang", percobaanMaks)
+	return fmt.Errorf("transfer saldo gagal setelah %d percobaan akibat konflik lock berulang", percobaanMaks)
 }
 
 func jalankanTransfer(ctx context.Context, db *sql.DB, idPertama, idKedua, idSumber, idTujuan, jumlah int64) error {
@@ -95,12 +105,30 @@ func jalankanTransfer(ctx context.Context, db *sql.DB, idPertama, idKedua, idSum
 	if err != nil {
 		return fmt.Errorf("mulai transaction transfer: %w", err)
 	}
+	// Rollback wajib dijalankan di semua jalur gagal, termasuk setelah
+	// error 1205 yang di InnoDB tidak membatalkan transaction secara otomatis.
 	defer tx.Rollback()
 
-	// Mengunci kedua baris dalam urutan id yang konsisten, BUKAN urutan
+	// Kunci kedua baris dalam urutan id yang konsisten, bukan urutan
 	// sumber-lalu-tujuan yang bisa terbalik tergantung arah transfer.
-	if _, err := tx.ExecContext(ctx, `SELECT id FROM rekening WHERE id IN (?, ?) ORDER BY id FOR UPDATE`, idPertama, idKedua); err != nil {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM rekening WHERE id IN (?, ?) ORDER BY id FOR UPDATE`, idPertama, idKedua)
+	if err != nil {
 		return fmt.Errorf("kunci baris rekening: %w", err)
+	}
+	var terkunci int
+	for rows.Next() {
+		terkunci++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("baca baris rekening terkunci: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("tutup hasil penguncian: %w", err)
+	}
+	if terkunci != 2 {
+		return fmt.Errorf("rekening sumber atau tujuan tidak ditemukan")
 	}
 
 	if _, err := tx.ExecContext(ctx, `UPDATE rekening SET saldo = saldo - ? WHERE id = ?`, jumlah, idSumber); err != nil {
@@ -110,16 +138,21 @@ func jalankanTransfer(ctx context.Context, db *sql.DB, idPertama, idKedua, idSum
 		return fmt.Errorf("tambah saldo tujuan: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transfer: %w", err)
+	}
+	return nil
 }
 
-// errDeadlock memeriksa apakah error yang dikembalikan database adalah
-// deadlock — pemeriksaan sesungguhnya di produksi sebaiknya memakai
-// pemeriksaan kode error spesifik driver (misalnya errors.As ke tipe error
-// MySQL/pgx yang menyediakan kode SQLSTATE), bukan string matching seperti
-// contoh sederhana ini.
-func errDeadlock(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "deadlock")
+// layakDiulang memeriksa kode error MySQL/MariaDB, bukan mencocokkan teks
+// pesan error yang bisa berubah antar versi. Di PostgreSQL, padanannya adalah
+// SQLSTATE 40P01 (deadlock_detected) lewat *pgconn.PgError.
+func layakDiulang(err error) bool {
+	var myErr *mysql.MySQLError
+	if !errors.As(err, &myErr) {
+		return false
+	}
+	return myErr.Number == errMySQLDeadlock || myErr.Number == errMySQLLockWaitTimeout
 }
 ```
 
@@ -129,7 +162,7 @@ Sistem dengan banyak endpoint yang ditulis developer berbeda (persis konteks 13 
 
 ## Trade-offs and When Not To Use It
 
-Menghilangkan deadlock sepenuhnya lewat urutan locking yang konsisten butuh disiplin lintas seluruh basis kode — satu endpoint yang lupa mengikuti konvensi ini cukup untuk membuka kembali kemungkinan deadlock. Untuk sistem yang sangat besar dengan banyak tim independen, mengandalkan retry (seperti pada kode Go di atas) sebagai jaring pengaman **selain** urutan locking yang konsisten adalah pendekatan yang lebih realistis daripada berharap disiplin manual tanpa cacat di semua tempat. Retry sendiri bukan solusi gratis — ia menambah latensi (transaction yang gagal harus diulang dari awal) dan mengasumsikan operasi yang di-retry bersifat aman diulang (idempotent dari sisi efek yang sudah ter-`commit` sebagian, yang seharusnya tidak terjadi kalau `ROLLBACK` benar-benar membatalkan seluruh perubahan transaction yang gagal).
+Menghilangkan deadlock sepenuhnya lewat urutan locking yang konsisten butuh disiplin lintas seluruh basis kode — satu endpoint yang lupa mengikuti konvensi ini cukup untuk membuka kembali kemungkinan deadlock. Untuk sistem yang sangat besar dengan banyak tim independen, mengandalkan retry (seperti pada kode Go di atas) sebagai jaring pengaman **selain** urutan locking yang konsisten adalah pendekatan yang lebih realistis daripada berharap disiplin manual tanpa cacat di semua tempat. Retry sendiri bukan solusi gratis. Ia menambah latensi, karena transaction yang gagal harus diulang dari awal. Ia juga hanya aman kalau seluruh efek transaction berada di dalam database. `ROLLBACK` membatalkan perubahan data, tapi tidak bisa menarik kembali email yang sudah terkirim atau API partner yang sudah dipanggil di tengah transaction. Efek samping eksternal seperti itu harus dikeluarkan dari transaction (lihat pola outbox) atau dibuat idempotent.
 
 ## Common Mistakes
 
@@ -166,7 +199,7 @@ Menghilangkan deadlock sepenuhnya lewat urutan locking yang konsisten butuh disi
 - [[MVCC]] — MVCC mengurangi jenis lock yang dibutuhkan (baca tidak perlu lock), tapi tidak menghilangkan kemungkinan deadlock dari locking tulis-tulis yang tetap dibutuhkan.
 - [[The N+1 Query Problem]] — transaction dengan banyak query berurutan yang menahan lock lebih lama (mirip pola N+1) memperbesar jendela kemungkinan deadlock.
 - [[../90 Architecture and Design/Cross-Team Code Standards|Cross-Team Code Standards]] — konvensi urutan locking lintas tim adalah salah satu bentuk konkret standar kode yang dibahas lebih luas di note senior itu.
-- [[../50 Concurrency and Performance/_Overview|Concurrency and Performance Overview]] — retry dengan backoff untuk deadlock adalah pola yang sama dengan retry untuk kegagalan transient lain yang dibahas di domain itu.
+- [[../30 APIs and Web/Retries with Exponential Backoff and Jitter|Retries with Exponential Backoff and Jitter]] — retry untuk deadlock adalah kasus khusus retry atas kegagalan transient; prinsip backoff dan batas percobaannya sama.
 
 ## Further Reading
 

@@ -53,7 +53,7 @@ Pilihan tipe data yang paling sering keliru:
 | Kebutuhan | Tipe yang salah | Tipe yang benar | Alasan |
 |---|---|---|---|
 | Nilai uang | `FLOAT`/`DOUBLE` | `DECIMAL(p, s)` | `FLOAT` adalah representasi biner aproksimatif, rentan galat pembulatan yang terakumulasi pada operasi berulang. |
-| Timestamp lintas zona waktu | `DATETIME` tanpa info zona waktu | `TIMESTAMP` (dengan zona waktu tersimpan/dikonversi eksplisit) | `DATETIME` polos ambigu soal zona waktu mana yang dimaksud, sumber [[../94 Case Studies/Case - The Timezone Bug in a Nationwide Report|bug batas tanggal lintas zona waktu]]. |
+| Timestamp lintas zona waktu | `DATETIME` tanpa kesepakatan zona waktu | PostgreSQL: `timestamptz`. MySQL/MariaDB: `DATETIME` yang disepakati selalu berisi UTC, atau `TIMESTAMP` dengan `time_zone` sesi yang konsisten | `DATETIME` polos tidak menyimpan zona waktu, jadi maknanya bergantung pada kesepakatan. `TIMESTAMP` MySQL/MariaDB juga tidak menyimpan zona waktu: ia mengonversi dari `time_zone` sesi ke UTC saat menulis dan balik saat membaca, sehingga dua koneksi dengan `time_zone` berbeda melihat jam yang berbeda, dan rentang nilainya terbatas (masalah tahun 2038 di banyak versi). Lihat [[../94 Case Studies/Case - The Timezone Bug in a Nationwide Report|bug batas tanggal lintas zona waktu]]. |
 | ID yang bertumbuh sangat besar | `INT` (jangkauan terbatas) | `BIGINT` | `INT` standar punya batas atas sekitar 2.1 miliar — tabel log atau transaksi bervolume tinggi bisa mendekatinya lebih cepat dari perkiraan. |
 | Status/kategori tetap | `VARCHAR` bebas | `ENUM` atau tabel referensi + `FOREIGN KEY` | String bebas membuka celah salah ketik (`'aktif'` vs `'Aktif'` vs `'active'`) yang tidak akan pernah tertangkap constraint apa pun. |
 
@@ -74,16 +74,32 @@ import (
 // TarikSaldo mencoba mengandalkan CHECK constraint di database sebagai
 // pertahanan terakhir — bukan satu-satunya validasi, tapi jaring pengaman
 // yang tidak bisa dilewati jalur penulisan mana pun.
+// Nomor error pelanggaran CHECK berbeda antara dua cabang database ini.
+const (
+	errCheckMySQL   = 3819 // ER_CHECK_CONSTRAINT_VIOLATED (MySQL 8.0.16+)
+	errCheckMariaDB = 4025 // ER_CONSTRAINT_FAILED (MariaDB)
+)
+
 func TarikSaldo(ctx context.Context, db *sql.DB, rekeningID int, jumlah string) error {
-	_, err := db.ExecContext(ctx, `
+	res, err := db.ExecContext(ctx, `
 		UPDATE rekening SET saldo = saldo - ? WHERE id = ?
 	`, jumlah, rekeningID)
 	if err != nil {
 		var mysqlErr *mysql.MySQLError
-		if errors.As(err, &mysqlErr) && mysqlErr.Number == 3819 { // CHECK constraint violation
+		if errors.As(err, &mysqlErr) &&
+			(mysqlErr.Number == errCheckMySQL || mysqlErr.Number == errCheckMariaDB) {
 			return fmt.Errorf("penarikan ditolak, saldo tidak boleh negatif: %w", err)
 		}
 		return fmt.Errorf("tarik saldo rekening %d: %w", rekeningID, err)
+	}
+	// UPDATE yang tidak menemukan baris TIDAK mengembalikan error;
+	// rekening yang tidak ada harus diperiksa lewat RowsAffected.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("baca rows affected rekening %d: %w", rekeningID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("rekening %d tidak ditemukan", rekeningID)
 	}
 	return nil
 }

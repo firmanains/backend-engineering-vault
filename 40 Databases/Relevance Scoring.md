@@ -88,15 +88,15 @@ func contohPenggunaan() (skorKataUmum, skorKataLangka float64) {
 	// frekuensi kemunculannya di dokumen ini sama.
 	skorKataLangka = HitungTFIDFSederhana(15, 200, 50, 10000)
 
+	// skorKataLangka jauh lebih besar dari skorKataUmum: frekuensinya di
+	// dokumen sama, tapi kata yang langka di korpus lebih informatif.
 	return skorKataUmum, skorKataLangka
-	// skorKataLangka akan jauh lebih besar dari skorKataUmum, menunjukkan
-	// kenapa kata langka/spesifik lebih berpengaruh terhadap relevansi.
 }
 ```
 
 ## In His Stack
 
-Elasticsearch memakai BM25 sebagai algoritma default sejak beberapa versi (menggantikan TF-IDF murni yang dipakai versi lebih lama) — memahami TF-IDF tetap berharga sebagai fondasi konseptual sebelum memahami BM25 sebagai penyempurnaannya. Untuk pencarian dokumen legal-services, kombinasi boosting manual sangat relevan — misalnya, kecocokan pada field `judul_permohonan` diberi bobot jauh lebih tinggi dibanding kecocokan pada field `catatan_tambahan`, dan dokumen yang berstatus "aktif" bisa diberi boost dibanding dokumen berstatus "arsip" — keputusan bisnis yang diterjemahkan jadi konfigurasi boosting di level query Elasticsearch.
+Elasticsearch memakai BM25 sebagai algoritma default sejak versi 5.0 (menggantikan TF-IDF klasik yang dipakai versi lebih lama) — memahami TF-IDF tetap berharga sebagai fondasi konseptual sebelum memahami BM25 sebagai penyempurnaannya. Untuk pencarian dokumen legal-services, kombinasi boosting manual sangat relevan — misalnya, kecocokan pada field `judul_permohonan` diberi bobot jauh lebih tinggi dibanding kecocokan pada field `catatan_tambahan`, dan dokumen yang berstatus "aktif" bisa diberi boost dibanding dokumen berstatus "arsip" — keputusan bisnis yang diterjemahkan jadi konfigurasi boosting di level query Elasticsearch.
 
 ## Trade-offs and When Not To Use It
 
@@ -122,7 +122,7 @@ Relevance scoring berbasis statistik (TF-IDF/BM25) tidak memahami makna semantik
 
 > [!success]- Kunci jawaban
 > **1.** TF memastikan dokumen yang menyebut sebuah kata lebih sering (secara proporsional terhadap panjang dokumennya) dianggap lebih relevan untuk kata itu. IDF memastikan kata yang jarang muncul di seluruh korpus (karena itu lebih informatif/distingtif ketika muncul) diberi bobot lebih tinggi dibanding kata umum yang muncul di hampir semua dokumen. Perkalian keduanya menghasilkan skor tertinggi untuk kata yang **sering muncul di dokumen tertentu** DAN **jarang muncul secara umum** — kombinasi yang menandakan kata itu benar-benar sentral dan unik untuk dokumen tersebut, bukan sekadar kata umum yang kebetulan sering disebut di mana pun.
-> **4.** Penyebab paling mungkin: seluruh field (judul, isi, catatan tambahan) diberi bobot yang **sama** dalam perhitungan skor gabungan, sehingga dokumen panjang dengan banyak pengulangan kata kunci di field yang kurang penting bisa mengumpulkan skor total lebih tinggi dibanding dokumen dengan kecocokan tepat di judul tapi teksnya lebih pendek secara keseluruhan. Penyesuaian yang tepat: terapkan **field boosting** eksplisit di query Elasticsearch (misalnya `judul^3` memberi bobot tiga kali lipat untuk kecocokan di judul dibanding kecocokan di field lain yang tidak di-boost) — mencerminkan kepentingan bisnis nyata bahwa kecocokan di judul dokumen jauh lebih bermakna dibanding kecocokan di catatan tambahan yang sifatnya sekunder.
+> **4.** BM25 sendiri sudah membatasi efek pengulangan (saturasi) dan menghukum field yang panjang, jadi "dokumen panjang menang karena mengulang kata" jarang terjadi kalau setiap field dinilai terpisah. Penyebab yang lebih mungkin ada di cara query disusun. Pertama, query mencari ke satu field gabungan (misalnya hasil `copy_to` dari judul, isi, dan catatan), sehingga Elasticsearch tidak tahu lagi kata mana yang berasal dari judul. Kedua, query memakai `multi_match` bertipe `most_fields`, yang **menjumlahkan** skor semua field, sehingga dokumen yang cocok di banyak field (termasuk catatan) mengalahkan dokumen yang cocok kuat hanya di judul. Langkah pertama adalah memastikan penyebabnya dengan `"explain": true` pada query, yang menampilkan rincian skor per field. Perbaikannya: cari ke field terpisah dengan `multi_match` bertipe `best_fields` dan beri **field boosting** (`"fields": ["judul^3", "isi", "catatan_tambahan^0.5"]`), sehingga kecocokan di judul bernilai jauh lebih tinggi daripada kecocokan di catatan sekunder.
 
 ## Self-Check
 
@@ -135,7 +135,7 @@ Relevance scoring berbasis statistik (TF-IDF/BM25) tidak memahami makna semantik
 
 - [[Inverted Indexes and How Search Engines Work]] — relevance scoring beroperasi di atas hasil pencarian yang ditemukan lewat inverted index yang dijelaskan di note itu.
 - [[Keeping Search in Sync with the Source of Truth]] — kelanjutan langsung: risiko operasional dari sistem pencarian yang terpisah dari database sumber, dibahas di note berikutnya.
-- [[../92 Tools/_Overview|Tools Overview]] — BM25 sebagai algoritma default Elasticsearch dibahas lebih operasional di tool note Elasticsearch.
+- [[../92 Tools/Elasticsearch|Elasticsearch]] — BM25 sebagai algoritma default, boosting, dan `explain` dibahas lebih operasional di tool note itu.
 - [[../30 APIs and Web/Filtering and Sorting|Filtering and Sorting]] — pengurutan berdasarkan relevansi adalah bentuk khusus dari sorting yang dibahas lebih umum di note itu, dengan sumber nilai sort yang jauh lebih kompleks (skor, bukan kolom tunggal).
 - [[Beyond Relational - Document, Key-Value, Wide-Column, Graph, and Time-Series Stores]] — Elasticsearch sebagai document-oriented search engine berbagi filosofi skema fleksibel dengan document store yang dibahas di note itu.
 

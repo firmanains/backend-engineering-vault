@@ -71,7 +71,7 @@ const (
 type CircuitBreaker struct {
 	mu               sync.Mutex
 	state            stateBreaker
-	jumlahGagal      int
+	jumlahGagal      int // kegagalan BERTURUT-TURUT, di-reset setiap ada yang berhasil
 	ambangBatasGagal int
 	waktuDibuka      time.Time
 	jedaSebelumUji   time.Duration
@@ -88,13 +88,20 @@ func NewCircuitBreaker(ambangBatasGagal int, jedaSebelumUji time.Duration) *Circ
 
 func (cb *CircuitBreaker) Panggil(ctx context.Context, operasi func(context.Context) error) error {
 	cb.mu.Lock()
-	if cb.state == open {
+	switch cb.state {
+	case open:
 		if time.Since(cb.waktuDibuka) < cb.jedaSebelumUji {
 			cb.mu.Unlock()
 			return ErrCircuitTerbuka
 		}
-		// Jeda sudah lewat — izinkan satu panggilan uji coba.
+		// Jeda sudah lewat — panggilan INI menjadi satu-satunya uji coba.
 		cb.state = halfOpen
+	case halfOpen:
+		// Uji coba lain sedang berjalan. Panggilan lain tetap ditolak
+		// sampai hasil uji coba itu diketahui, supaya layanan yang baru
+		// pulih tidak langsung dibanjiri lagi.
+		cb.mu.Unlock()
+		return ErrCircuitTerbuka
 	}
 	cb.mu.Unlock()
 
@@ -103,6 +110,9 @@ func (cb *CircuitBreaker) Panggil(ctx context.Context, operasi func(context.Cont
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
+	// Catatan: versi production hanya menghitung kegagalan yang menandakan
+	// layanan tujuan bermasalah (timeout, 5xx), bukan error validasi dari
+	// input pemanggil sendiri (lihat Jebakan di bawah).
 	if err != nil {
 		cb.jumlahGagal++
 		if cb.state == halfOpen || cb.jumlahGagal >= cb.ambangBatasGagal {
@@ -118,6 +128,8 @@ func (cb *CircuitBreaker) Panggil(ctx context.Context, operasi func(context.Cont
 	return nil
 }
 ```
+
+Perhatikan cabang `halfOpen` di awal `Panggil`: tanpa cabang itu, begitu jeda lewat, **semua** panggilan yang datang bersamaan akan ikut lolos sebagai "uji coba", dan layanan yang baru pulih langsung dibanjiri lagi. Contoh ini juga sengaja memakai hitungan kegagalan berturut-turut; library production biasanya memakai tingkat kegagalan dalam jendela waktu, sesuai Jebakan pertama di bawah.
 
 Panggilan kode ini di praktik: `breaker.Panggil(ctx, func(ctx context.Context) error { return panggilLayananVerifikasi(ctx) })` — begitu breaker terbuka, panggilan berikutnya langsung mengembalikan `ErrCircuitTerbuka` tanpa pernah mengeksekusi `panggilLayananVerifikasi` sama sekali, persis mekanisme "gagal cepat" yang dibahas di atas.
 

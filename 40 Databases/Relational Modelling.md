@@ -18,7 +18,7 @@ Relational modelling adalah proses mengubah entitas dunia nyata (pengguna, permo
 
 ## The Problem
 
-Sistem permohonan dokumen awalnya dimodelkan dengan asumsi "satu permohonan hanya diproses satu petugas": kolom `petugas_id` langsung ditaruh di tabel `permohonan`. Ini bekerja baik selama berbulan-bulan. Lalu kebijakan berubah: sebuah permohonan bisa melewati **beberapa** petugas secara berurutan (pemroses awal, verifikator, penandatangan) — relasi yang sebenarnya satu-ke-banyak (satu permohonan, banyak petugas yang pernah menanganinya, masing-masing di tahap berbeda), bukan satu-ke-satu seperti yang dimodelkan.
+Sistem permohonan dokumen awalnya dimodelkan dengan asumsi "satu permohonan hanya diproses satu petugas": kolom `petugas_id` langsung ditaruh di tabel `permohonan`. Ini bekerja baik selama berbulan-bulan. Lalu kebijakan berubah: sebuah permohonan bisa melewati **beberapa** petugas secara berurutan (pemroses awal, verifikator, penandatangan). Kolom `petugas_id` di tabel `permohonan` memodelkan relasi banyak-ke-satu: banyak permohonan boleh ditangani satu petugas, tapi setiap permohonan hanya punya satu petugas. Kebutuhan barunya adalah banyak-ke-banyak: satu permohonan ditangani banyak petugas (masing-masing di tahap berbeda), dan satu petugas tetap menangani banyak permohonan.
 
 Karena kolom `petugas_id` sudah tertanam langsung di tabel `permohonan`, "memperbaikinya" berarti migrasi skema yang menyakitkan: membuat tabel baru `penanganan_permohonan` (junction table dengan kolom tambahan seperti `tahap` dan `waktu`), memindahkan data historis dari kolom lama ke tabel baru, lalu mengubah **setiap** query dan setiap baris kode aplikasi yang mengasumsikan "satu permohonan = satu petugas". Kalau kardinalitas relasi ini sudah dipikirkan sejak awal — bahkan kalau kebutuhan "banyak petugas" belum ada saat itu — model bisa dirancang lebih fleksibel dari awal, atau setidaknya perubahan ke depan sudah diantisipasi secara sadar, bukan ditemukan sebagai kejutan mendadak.
 
@@ -110,7 +110,7 @@ func AmbilRiwayatPenanganan(ctx context.Context, db *sql.DB, permohonanID int) (
 
 ## In His Stack
 
-Yii2 mendeklarasikan relasi lewat method seperti `getPermohonan()` yang memanggil `hasMany()`/`hasOne()`/`belongsTo()` di `ActiveRecord` — ini murni lapisan kenyamanan di atas foreign key yang **sudah harus** benar dulu di skema database; Yii2 tidak menyimpulkan kardinalitas relasi, ia hanya mencerminkan apa yang sudah kamu definisikan lewat foreign key dan method itu sendiri. Kesalahan model yang sudah tertanam di skema (seperti `petugas_id` langsung di `permohonan` pada contoh di atas) akan tercermin persis sama di `ActiveRecord` — `belongsTo(Petugas::class)` yang mengasumsikan satu-ke-satu, dan migrasi model yang sama-sama harus dilakukan di kedua lapisan (skema database dan relasi `ActiveRecord`) sekaligus.
+Yii2 mendeklarasikan relasi lewat method seperti `getPermohonan()` yang memanggil `hasMany()` atau `hasOne()` di `ActiveRecord` (Yii2 tidak punya `belongsTo()` seperti Laravel; sisi "banyak-ke-satu" juga ditulis dengan `hasOne()`) — ini murni lapisan kenyamanan di atas foreign key yang **sudah harus** benar dulu di skema database; Yii2 tidak menyimpulkan kardinalitas relasi, ia hanya mencerminkan apa yang sudah kamu definisikan lewat foreign key dan method itu sendiri. Kesalahan model yang sudah tertanam di skema (seperti `petugas_id` langsung di `permohonan` pada contoh di atas) akan tercermin persis sama di `ActiveRecord` — `hasOne(Petugas::class, ['id' => 'petugas_id'])` yang mengasumsikan satu petugas per permohonan, dan migrasi model yang sama-sama harus dilakukan di kedua lapisan (skema database dan relasi `ActiveRecord`) sekaligus.
 
 ## Trade-offs and When Not To Use It
 
@@ -119,7 +119,7 @@ Model relasional yang "benar secara akademis" (setiap kardinalitas dimodelkan pr
 ## Common Mistakes
 
 > [!warning] Jebakan
-> Menaruh foreign key langsung di tabel "satu" untuk relasi yang sebenarnya satu-ke-banyak atau banyak-ke-banyak — mengunci model ke asumsi kardinalitas yang salah sejak awal, seperti pada contoh "The Problem".
+> Menaruh foreign key langsung di tabel utama (`permohonan.petugas_id`) untuk relasi yang sebenarnya banyak-ke-banyak — mengunci model ke asumsi "satu pasangan per baris" sejak awal, seperti pada contoh "The Problem".
 
 > [!warning] Jebakan
 > Membuat tabel penghubung tanpa primary key/unique constraint pada kombinasi kedua foreign key-nya — membuka celah baris duplikat untuk pasangan relasi yang sama (misalnya satu pegawai terdaftar dua kali untuk pelatihan yang sama).

@@ -51,6 +51,8 @@ Diagram ini menunjukkan pendekatan load testing yang umum: **beban bertahap** (r
 
 **Menentukan pola traffic yang realistis** adalah bagian tersulit dan paling sering diabaikan dari load testing — traffic production nyata jarang berupa satu jenis request diulang identik; ia adalah campuran (misalnya 70% baca ringan, 20% baca berat/pencarian, 10% tulis) yang masing-masing punya karakteristik beban berbeda pada komponen sistem yang berbeda pula. Load test yang hanya mensimulasikan satu jenis request (biasanya yang paling sederhana untuk diuji) memberi hasil yang tidak representatif terhadap kondisi nyata yang jauh lebih kompleks.
 
+**Model beban menentukan apakah angka latency-nya jujur.** Banyak tool (dan skrip buatan sendiri) memakai model *tertutup*: sejumlah tetap "pengguna virtual" yang masing-masing baru mengirim request berikutnya setelah response sebelumnya diterima. Masalahnya, begitu sistem melambat, pengguna virtual ikut melambat mengirim, sehingga beban yang diterima sistem justru turun tepat saat sistem sedang kesulitan. Request yang "seharusnya" terkirim selama jeda itu tidak pernah diukur, dan persentil latency yang dilaporkan jauh lebih baik dari kenyataan. Gil Tene menyebut fenomena ini *coordinated omission*. Traffic publik tidak berperilaku seperti itu: warga tetap datang dengan laju yang sama meski server sedang lambat. Untuk meniru hal itu, pakai model *terbuka* dengan laju kedatangan tetap (Vegeta bekerja dengan laju tetap; k6 punya executor `constant-arrival-rate`). Pastikan juga mesin pembangkit beban sendiri tidak menjadi bottleneck (CPU-nya jenuh, atau kehabisan port/koneksi), karena itu pun membuat hasilnya terlihat lebih baik dari kenyataan.
+
 **Mengamati bottleneck, bukan hanya hasil akhir**, adalah nilai sesungguhnya load testing — saat sistem mulai menunjukkan degradasi di bawah beban, pertanyaan penting bukan hanya "pada beban berapa sistem gagal", tapi "**komponen mana** yang menjadi bottleneck pertama" (CPU aplikasi? Connection pool database? Memori? Rate limit API partner?) — jawaban ini menentukan mana yang harus dioptimasi atau diskalakan lebih dulu, informasi yang hanya bisa didapat dengan memantau metrik **setiap** komponen (bukan hanya latency endpoint) selama load test berjalan.
 
 ## In Go
@@ -61,23 +63,44 @@ Load testing sistem secara keseluruhan biasanya dilakukan dengan tool eksternal 
 package main
 
 import (
-	"fmt"
+	"log"
 	"net/http"
-	_ "net/http/pprof" // aktifkan pprof SELAMA load test untuk profiling langsung
+	_ "net/http/pprof" // mendaftarkan /debug/pprof/ di http.DefaultServeMux
+	"time"
 )
 
-// Aplikasi yang akan di-load-test sebaiknya SUDAH mengekspos endpoint
-// health check dan metrik (lihat domain 70 Infrastructure and Delivery)
-// SEBELUM load test dimulai — tanpa observability yang memadai, load
-// test hanya memberi tahu "sistem gagal" tanpa menjelaskan KENAPA.
+// Aplikasi yang akan di-load-test sebaiknya sudah mengekspos health check
+// dan metrik (lihat domain 70 Infrastructure and Delivery) sebelum load
+// test dimulai. Tanpa observability, load test hanya memberi tahu "sistem
+// gagal" tanpa menjelaskan kenapa.
 func main() {
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	// Mux sendiri untuk aplikasi. Kalau aplikasi juga memakai
+	// DefaultServeMux (handler nil), endpoint pprof yang didaftarkan oleh
+	// import di atas ikut terekspos di port publik.
+	app := http.NewServeMux()
+	app.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	go http.ListenAndServe("localhost:6060", nil) // pprof terpisah
 
-	fmt.Println("aplikasi siap di-load-test")
-	http.ListenAndServe(":8080", nil)
+	// pprof hanya di localhost, memakai DefaultServeMux.
+	go func() {
+		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+			log.Printf("server pprof berhenti: %v", err)
+		}
+	}()
+
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           app,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Println("aplikasi siap di-load-test di :8080")
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("server aplikasi berhenti: %v", err)
+	}
 }
 ```
 
@@ -102,6 +125,9 @@ Load testing yang realistis butuh investasi waktu dan sumber daya nyata — meny
 
 > [!warning] Jebakan
 > Hanya melihat hasil akhir (berhasil/gagal pada beban tertentu) tanpa memantau metrik setiap komponen selama load test berjalan — kehilangan informasi penting soal komponen mana yang sebenarnya menjadi bottleneck pertama.
+
+> [!warning] Jebakan
+> Memakai tool dengan model beban tertutup (jumlah pengguna virtual tetap yang menunggu response) untuk mengukur latency — saat sistem melambat, beban yang dikirim ikut turun dan persentil latency yang dilaporkan jauh lebih optimis dari kenyataan (*coordinated omission*). Pakai laju kedatangan tetap.
 
 > [!warning] Jebakan
 > Menjalankan load test langsung terhadap production tanpa perencanaan matang dan kemampuan menghentikan segera — berisiko mengganggu pengguna nyata yang sedang memakai sistem pada saat yang sama.

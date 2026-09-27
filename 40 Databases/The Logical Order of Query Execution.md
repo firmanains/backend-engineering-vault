@@ -30,7 +30,7 @@ ORDER BY jumlah_permohonan DESC;
 
 Ini gagal dengan error semacam `Unknown column 'jumlah_permohonan' in 'where clause'`. Alasan intuitif "kan `jumlah_permohonan` sudah didefinisikan di baris pertama" terasa masuk akal — sampai kamu sadar `WHERE` dieksekusi **sebelum** `SELECT` bahkan sempat menghitung apa pun. Baris `SELECT` yang "di atas" secara tekstual justru salah satu tahap **terakhir** yang dievaluasi. Memindahkan syarat itu ke `HAVING COUNT(*) > 100` memperbaikinya — tapi tanpa memahami urutan logisnya, perbaikan ini terasa seperti mantra, bukan konsekuensi yang bisa diprediksi.
 
-Yang lebih berbahaya: kadang kesalahan urutan ini **tidak** menghasilkan error sama sekali, hanya angka yang diam-diam salah — misalnya memfilter `WHERE status = 'aktif'` padahal maksudnya memfilter *setelah* agregasi per instansi, sehingga instansi yang salah satu permohonannya berstatus non-aktif malah hilang seluruhnya dari laporan.
+Yang lebih berbahaya: kadang kesalahan urutan ini **tidak** menghasilkan error sama sekali, hanya angka yang diam-diam salah — misalnya memfilter `WHERE status = 'aktif'` padahal maksudnya memfilter *setelah* agregasi per instansi, sehingga angka setiap instansi hanya menghitung permohonan aktifnya, bukan seluruh permohonannya, dan instansi yang tidak punya permohonan aktif sama sekali hilang dari laporan.
 
 ## Intuition
 
@@ -54,7 +54,9 @@ flowchart TD
     H --> I["LIMIT / OFFSET\n(potong jumlah baris)"]
 ```
 
-Diagram ini menjelaskan setiap aturan yang sering terasa "aneh": `WHERE` ada di tahap C, sebelum `SELECT` (tahap F) sempat membuat alias apa pun — jadi `WHERE` tidak pernah bisa melihat alias `SELECT`. `HAVING` ada di tahap E, setelah `GROUP BY` — jadi `HAVING` bisa memfilter hasil `COUNT()`/`SUM()` yang belum ada sebelum pengelompokan terjadi, sesuatu yang mustahil dilakukan `WHERE`. `ORDER BY` ada di tahap H, **setelah** `SELECT` — jadi ia satu-satunya klausa selain `SELECT` sendiri yang boleh memakai alias kolom.
+Diagram ini menjelaskan setiap aturan yang sering terasa "aneh": `WHERE` ada di tahap C, sebelum `SELECT` (tahap F) sempat membuat alias apa pun — jadi `WHERE` tidak pernah bisa melihat alias `SELECT`. `HAVING` ada di tahap E, setelah `GROUP BY` — jadi `HAVING` bisa memfilter hasil `COUNT()`/`SUM()` yang belum ada sebelum pengelompokan terjadi, sesuatu yang mustahil dilakukan `WHERE`. `ORDER BY` ada di tahap H, **setelah** `SELECT` — jadi menurut standar SQL ia satu-satunya klausa selain `SELECT` sendiri yang boleh memakai alias kolom.
+
+Catatan dialek yang relevan untuk MariaDB: MySQL/MariaDB sebagai ekstensi juga menerima alias di `GROUP BY` dan `HAVING` (misalnya `HAVING jumlah_permohonan > 100`), dan PostgreSQL menerima alias di `GROUP BY`. Ekstensi itu nyaman tapi tidak portabel. Menulis ulang ekspresinya (`HAVING COUNT(*) > 100`) bekerja di semua database dan sesuai dengan urutan logis yang dijelaskan di sini.
 
 Query dari bagian "The Problem", ditulis benar mengikuti urutan ini:
 
@@ -75,11 +77,8 @@ Kesalahan urutan logis ini paling sering muncul saat query dibangun secara dinam
 package main
 
 import (
-	"context"
 	"fmt"
 	"strings"
-
-	"github.com/jmoraru/sqlbuilder" // ilustratif — bentuk API mirip query builder pada umumnya
 )
 
 // FilterLaporan menampung syarat yang dipilih user di UI laporan.
@@ -133,7 +132,7 @@ func BangunQueryLaporanBenar(f FilterLaporan) string {
 func main() {
 	f := FilterLaporan{Status: "diajukan", MinJumlah: 100}
 	fmt.Println(BangunQueryLaporanBenar(f))
-	_ = context.Background() // pengingat: query nyata selalu dijalankan lewat ctx, lihat database/sql and sqlx
+	// Query nyata selalu dijalankan lewat ctx (QueryContext), lihat database-sql and sqlx.
 }
 ```
 
@@ -167,7 +166,7 @@ Ini adalah aturan semantik SQL, bukan teknik yang punya alternatif — tidak ada
 4. Desain terbuka: tim data mengeluh dashboard laporan bulanan kadang menampilkan instansi dengan jumlah permohonan yang "terlihat kurang" dibanding data mentah di database. Setelah investigasi, ternyata query-nya memakai `WHERE status = 'aktif'` padahal maksud aslinya adalah "tampilkan instansi yang **punya minimal satu** permohonan aktif, dihitung dari **seluruh** permohonannya". Jelaskan kenapa urutan logis `WHERE` sebelum `GROUP BY` menyebabkan bug ini, dan rancang query yang benar.
 
 > [!success]- Kunci jawaban
-> **1.** `rata_gaji` belum ada di titik `WHERE` dievaluasi karena itu bukan kolom asli tabel — solusinya memakai subquery di `WHERE`: `WHERE gaji > (SELECT AVG(gaji) FROM pegawai)`, karena subquery ini dievaluasi sebagai bagian dari tahap `FROM`/ekspresi sebelum `WHERE` memakainya, bukan bergantung pada alias `SELECT` di query luar.
+> **1.** `rata_gaji` belum ada di titik `WHERE` dievaluasi karena itu bukan kolom asli tabel — solusinya memakai subquery di `WHERE`: `WHERE gaji > (SELECT AVG(gaji) FROM pegawai)`. Subquery skalar ini adalah ekspresi yang berdiri sendiri di dalam `WHERE`, dengan urutan logisnya sendiri, sehingga ia tidak bergantung pada alias `SELECT` di query luar.
 > **2.** `HAVING` memfilter *kelompok* yang dihasilkan `GROUP BY` — kalau `GROUP BY` belum berjalan, tidak ada kelompok atau nilai agregat untuk difilter. Dan `HAVING` harus sebelum `SELECT` karena secara semantik ia menentukan baris kelompok mana yang lolos ke tahap pembentukan output; `SELECT` tidak pernah "menyaring", ia hanya membentuk bentuk kolom dari baris yang sudah lolos semua penyaringan sebelumnya.
 > **4.** `WHERE status = 'aktif'` membuang baris permohonan non-aktif **sebelum** `GROUP BY instansi_id` sempat mengelompokkan seluruh permohonan milik instansi tersebut — akibatnya instansi yang di antara permohonannya ada status non-aktif tetap dihitung, tapi baris non-aktifnya sudah hilang duluan, membuat `COUNT()` di bawah nilai sebenarnya (atau instansi hilang total kalau kebetulan tidak ada baris aktif sama sekali). Query yang benar memindahkan syarat status ke dalam ekspresi agregat bersyarat: `SELECT instansi_id, COUNT(*) AS total_semua, SUM(CASE WHEN status = 'aktif' THEN 1 ELSE 0 END) AS total_aktif FROM permohonan GROUP BY instansi_id` — sehingga seluruh baris tetap ikut dikelompokkan, dan pembedaan aktif/non-aktif terjadi di dalam agregasi, bukan sebelum pengelompokan.
 

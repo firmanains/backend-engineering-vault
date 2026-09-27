@@ -42,7 +42,9 @@ Nama "CAP" sering disalahpahami seolah sistem harus memilih dua dari tiga huruf 
 
 ## Under The Hood
 
-CAP theorem, sebagaimana dibuktikan formal oleh Eric Brewer dan kemudian Seth Gilbert dan Nancy Lynch, berlaku spesifik untuk sistem yang menyimpan **data yang sama di lebih dari satu node** dan harus menjaga konsistensi di antara node-node itu. Sistem yang tidak menyimpan data terduplikasi di banyak node (sistem single-node murni) tidak tunduk pada trade-off ini sama sekali — CAP hanya relevan begitu replikasi data lintas node masuk ke gambaran.
+CAP diajukan Eric Brewer sebagai dugaan (*conjecture*) pada tahun 2000, lalu dibuktikan secara formal oleh Seth Gilbert dan Nancy Lynch pada 2002. Pembuktian itu memakai definisi yang jauh lebih sempit daripada pemakaian sehari-hari. **C** di CAP berarti *linearizability* (setiap baca melihat tulisan terbaru, seolah hanya ada satu salinan data; lihat [[Consistency Models]]), bukan "konsisten" secara umum. **A** berarti *setiap* node yang tidak mati wajib memberi respons non-error untuk setiap request, bukan sekadar "biasanya bisa diakses". Karena definisinya seketat itu, banyak database nyata tidak masuk kotak CP maupun AP secara murni: sistem yang memakai replikasi asinkron tanpa failover otomatis, misalnya, tidak linearizable dan juga tidak memenuhi A versi CAP. Label "database X adalah CP" karena itu sering lebih menyesatkan daripada membantu; pertanyaan yang lebih berguna adalah jaminan apa yang diberikan untuk operasi tertentu, dalam kegagalan tertentu.
+
+Teorema ini berlaku spesifik untuk sistem yang menyimpan **data yang sama di lebih dari satu node** dan harus menjaga konsistensi di antara node-node itu. Sistem yang tidak menyimpan data terduplikasi di banyak node (sistem single-node murni) tidak tunduk pada trade-off ini sama sekali — CAP hanya relevan begitu replikasi data lintas node masuk ke gambaran.
 
 Kesalahpahaman umum yang perlu diluruskan: CAP bukan tentang memilih arsitektur sekali untuk selamanya — banyak sistem nyata (termasuk database modern) memungkinkan **konfigurasi per-operasi**, memilih tingkat consistency yang berbeda untuk kebutuhan berbeda dalam sistem yang sama. Baca saldo rekening mungkin butuh consistency ketat (linearizable, lihat [[Consistency Models]]); baca jumlah "like" di postingan media sosial mungkin bisa menerima eventual consistency demi latency yang jauh lebih rendah. Trade-off CAP/PACELC diambil di level **keputusan desain per kebutuhan**, bukan di level "seluruh sistem harus satu pilihan".
 
@@ -53,25 +55,23 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
-// WriteConcern merepresentasikan keputusan CAP/PACELC yang DIAMBIL
-// SECARA SADAR per operasi — bukan satu pilihan tunggal untuk
-// seluruh sistem.
+// WriteConcern merepresentasikan keputusan PACELC yang diambil secara
+// sadar per operasi, bukan satu pilihan untuk seluruh sistem.
 type WriteConcern int
 
 const (
-	// AcknowledgeOne: tulisan dianggap berhasil begitu SATU node
-	// menerimanya — latency rendah, tapi risiko konsistensi kalau
-	// node itu gagal sebelum sempat mereplikasi ke node lain.
+	// AcknowledgeOne: berhasil begitu SATU node mengonfirmasi. Latency
+	// rendah, tapi tulisan bisa hilang kalau node itu mati sebelum
+	// replikasi ke node lain selesai.
 	AcknowledgeOne WriteConcern = iota
-	// AcknowledgeQuorum: tulisan dianggap berhasil setelah MAYORITAS
-	// node mengonfirmasi — latency lebih tinggi, konsistensi lebih kuat.
+	// AcknowledgeQuorum: berhasil setelah MAYORITAS node mengonfirmasi.
 	AcknowledgeQuorum
-	// AcknowledgeAll: tulisan HARUS dikonfirmasi SEMUA node — latency
-	// paling tinggi, konsistensi paling kuat, availability paling rendah
-	// (satu node mati berarti tulisan gagal sepenuhnya).
+	// AcknowledgeAll: berhasil hanya kalau SEMUA node mengonfirmasi;
+	// satu node mati berarti tulisan gagal.
 	AcknowledgeAll
 )
 
@@ -79,29 +79,47 @@ type Node interface {
 	Write(ctx context.Context, key, value string) error
 }
 
-// Write menunjukkan keputusan trade-off PACELC yang EKSPLISIT,
-// dipilih berdasarkan kebutuhan operasi ini, bukan hardcoded satu
-// pilihan untuk seluruh sistem.
+// Write mengirim tulisan ke SEMUA node secara paralel, dan kembali begitu
+// jumlah konfirmasi yang diminta concern tercapai. Concern hanya mengatur
+// kapan pemanggil diberi jawaban; tulisan ke node lain tetap berjalan di
+// latar belakang, jadi replikasi tidak dilewati.
+//
+// ctx harus berumur cukup panjang untuk tulisan yang masih berjalan
+// setelah fungsi ini kembali; di sistem nyata replikasi lanjutan biasanya
+// dikerjakan oleh node itu sendiri, bukan oleh klien.
 func Write(ctx context.Context, nodes []Node, concern WriteConcern, key, value string) error {
 	required := requiredAcks(concern, len(nodes))
-	acked := 0
 
-	for _, node := range nodes {
-		if err := node.Write(ctx, key, value); err == nil {
-			acked++
-		}
-		if acked >= required {
-			return nil // Syarat concern terpenuhi, TIDAK menunggu sisa node
-		}
+	// Buffer seukuran jumlah node: goroutine yang selesai belakangan tetap
+	// bisa mengirim hasilnya dan berhenti, meski tidak ada lagi yang membaca.
+	hasil := make(chan error, len(nodes))
+	for _, n := range nodes {
+		go func() { hasil <- n.Write(ctx, key, value) }()
 	}
 
+	var acked int
+	var errs []error
+	for range nodes {
+		err := <-hasil
+		if err == nil {
+			acked++
+			if acked >= required {
+				return nil // syarat concern terpenuhi
+			}
+			continue
+		}
+		errs = append(errs, err)
+		if len(nodes)-len(errs) < required {
+			// Konfirmasi yang tersisa tidak mungkin lagi mencapai syarat.
+			return fmt.Errorf("replication: %d/%d node mengonfirmasi, butuh %d: %w",
+				acked, len(nodes), required, errors.Join(errs...))
+		}
+	}
 	return fmt.Errorf("replication: hanya %d/%d node mengonfirmasi, butuh %d", acked, len(nodes), required)
 }
 
 func requiredAcks(concern WriteConcern, totalNodes int) int {
 	switch concern {
-	case AcknowledgeOne:
-		return 1
 	case AcknowledgeQuorum:
 		return totalNodes/2 + 1
 	case AcknowledgeAll:
@@ -159,8 +177,10 @@ Bukan CAP theorem itu sendiri yang punya "kapan tidak dipakai" — ia berlaku un
 
 ## Further Reading
 
-- Eric Brewer, presentasi asli CAP theorem (2000), dan pembuktian formal oleh Seth Gilbert dan Nancy Lynch (2002) — sumber akademik asli yang layak dibaca langsung untuk pemahaman rigor, relevan untuk ambisi studi master distributed systems.
-- Daniel Abadi, tulisan asli yang memperkenalkan PACELC sebagai perluasan CAP.
+- Eric Brewer, keynote "Towards Robust Distributed Systems" (PODC 2000) — tempat CAP pertama kali diajukan sebagai conjecture.
+- Seth Gilbert dan Nancy Lynch, "Brewer's Conjecture and the Feasibility of Consistent, Available, Partition-Tolerant Web Services" (SIGACT News, 2002) — pembuktian formalnya; bacaan wajib untuk ambisi studi master distributed systems.
+- Daniel Abadi, "Consistency Tradeoffs in Modern Distributed Database System Design" (IEEE Computer, 2012) — artikel yang memperkenalkan PACELC.
+- Martin Kleppmann, "Please stop calling databases CP or AP" (2015) — kenapa label CP/AP sering menyesatkan untuk database nyata.
 
 ## Catatan Saya
 

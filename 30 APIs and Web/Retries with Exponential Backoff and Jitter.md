@@ -96,7 +96,8 @@ func panggilDenganRetry(ctx context.Context, operasi func(context.Context) error
 
 func hitungBackoffDenganJitter(percobaan int) time.Duration {
 	// Exponential backoff: 1s, 2s, 4s, 8s, ... dibatasi jedaMaksimal.
-	backoff := jedaBasis * time.Duration(1<<uint(percobaan))
+	// percobaan dimulai dari 1 untuk jeda pertama, jadi pangkatnya percobaan-1.
+	backoff := jedaBasis * time.Duration(1<<uint(percobaan-1))
 	if backoff > jedaMaksimal {
 		backoff = jedaMaksimal
 	}
@@ -122,7 +123,7 @@ Retry dengan backoff dan jitter relevan langsung untuk setiap panggilan ke layan
 
 ## Trade-offs and When Not To Use It
 
-Retry dengan backoff menambah latency untuk kasus kegagalan — trade-off yang harus disadari sejak awal, terutama kalau ada [[Timeout Budgets]] yang ketat di lapisan luar: retry lima kali dengan backoff eksponensial bisa dengan mudah menghabiskan seluruh budget waktu yang tersedia untuk satu request, membuat retry sendiri jadi penyebab timeout, bukan solusinya. Untuk operasi yang tidak idempotent dan tidak punya mekanisme idempotency key, retry otomatis sebaiknya dihindari sepenuhnya sampai mekanisme itu ada — lebih baik gagal cepat dan jelas daripada retry yang berisiko menghasilkan efek samping ganda.
+Retry dengan backoff menambah latency untuk kasus kegagalan — trade-off yang harus disadari sejak awal, terutama kalau ada [[Timeout Budgets]] yang ketat di lapisan luar: retry lima kali dengan backoff eksponensial bisa dengan mudah menghabiskan seluruh budget waktu yang tersedia untuk satu request, membuat retry sendiri jadi penyebab timeout, bukan solusinya. Retry juga berlipat ganda kalau diterapkan di beberapa lapisan sekaligus: gateway yang retry 3 kali ke service A, yang masing-masing retry 3 kali ke service B, menghasilkan sampai 9 panggilan ke B untuk satu request client, dan 27 kalau ada lapisan ketiga. Karena itu retry sebaiknya dilakukan di **satu** lapisan saja (biasanya yang paling dekat dengan dependensi yang gagal), atau dibatasi dengan *retry budget* (misalnya retry tidak boleh melebihi 10% dari total request). Untuk operasi yang tidak idempotent dan tidak punya mekanisme idempotency key, retry otomatis sebaiknya dihindari sepenuhnya sampai mekanisme itu ada — lebih baik gagal cepat dan jelas daripada retry yang berisiko menghasilkan efek samping ganda.
 
 ## Common Mistakes
 
@@ -143,7 +144,7 @@ Retry dengan backoff menambah latency untuk kasus kegagalan — trade-off yang h
 4. **(Open-ended)** Timmu punya timeout budget total 5 detik untuk sebuah panggilan ke layanan eksternal (dari [[Timeout Budgets]]), dan ingin menerapkan retry dengan exponential backoff di dalam budget itu. Rancang parameter retry (jumlah percobaan maksimal, jeda basis, jeda maksimal) yang masuk akal supaya retry tidak menghabiskan seluruh budget tanpa sisa waktu untuk percobaan terakhir benar-benar dieksekusi.
 
 > [!success]- Kunci jawaban
-> Untuk soal 4: dengan budget 5 detik, retry harus dirancang supaya total waktu tunggu antar percobaan jauh lebih kecil dari 5 detik, menyisakan waktu untuk percobaan itu sendiri dieksekusi (bukan hanya menunggu). Misalnya: jeda basis 200ms, faktor pengali 2, jeda maksimal 1 detik, dengan maksimal tiga percobaan — total waktu tunggu kasar sekitar 200ms + 400ms + 800ms (dengan jitter, bervariasi di sekitar itu) sekitar 1.4 detik, menyisakan lebih dari 3.5 detik untuk ketiga percobaan itu sendiri benar-benar dieksekusi. Parameter ini harus dihitung mundur dari budget yang tersedia, bukan dipilih dari angka default yang umum dipakai tanpa mempertimbangkan konteks — timeout budget yang sempit butuh parameter retry yang lebih agresif (jeda lebih pendek, percobaan lebih sedikit) dibanding budget yang longgar.
+> Untuk soal 4: dengan budget 5 detik, retry harus dirancang supaya total waktu tunggu antar percobaan jauh lebih kecil dari 5 detik, menyisakan waktu untuk percobaan itu sendiri dieksekusi (bukan hanya menunggu). Misalnya: jeda basis 200ms, faktor pengali 2, jeda maksimal 1 detik, dengan maksimal tiga percobaan. Tiga percobaan berarti dua jeda, sekitar 200ms dan 400ms (dengan full jitter, rata-ratanya malah lebih kecil), total sekitar 0.6 detik. Bagian yang paling sering terlupa adalah **timeout per percobaan**: tanpa itu, percobaan pertama yang menggantung bisa menghabiskan seluruh 5 detik sendirian. Dengan sisa sekitar 4.4 detik untuk tiga percobaan, setiap percobaan diberi timeout sekitar 1.3 detik lewat `context.WithTimeout` turunan dari ctx budget total, dan sebelum setiap percobaan kode memeriksa apakah sisa waktu di ctx masih cukup untuk satu percobaan lagi. Parameter ini harus dihitung mundur dari budget yang tersedia, bukan dipilih dari angka default yang umum dipakai tanpa mempertimbangkan konteks — timeout budget yang sempit butuh parameter retry yang lebih agresif (jeda lebih pendek, percobaan lebih sedikit) dibanding budget yang longgar.
 
 ## Self-Check
 

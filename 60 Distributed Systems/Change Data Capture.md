@@ -51,14 +51,21 @@ Poin penting yang membedakan CDC dari sekadar "trigger database": trigger dijala
 ```go
 package cdc
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
-// ChangeEvent merepresentasikan SATU perubahan yang ditangkap dari
-// transaction log — TIDAK PERNAH ditulis manual oleh aplikasi,
-// dihasilkan otomatis dari mekanisme CDC.
+// ChangeEvent merepresentasikan satu perubahan yang ditangkap dari
+// transaction log — tidak pernah ditulis manual oleh aplikasi,
+// dihasilkan otomatis dari mekanisme CDC. Operation memakai kode
+// singkat ala Debezium: "c" (create), "u" (update), "d" (delete),
+// dan "r" (read) — "r" muncul HANYA saat CDC pertama kali dijalankan
+// dan melakukan snapshot awal seluruh isi tabel yang sudah ada,
+// sebelum ia mulai membaca transaction log secara live.
 type ChangeEvent struct {
 	Table     string
-	Operation string // "insert", "update", "delete"
+	Operation string
 	Before    map[string]any
 	After     map[string]any
 }
@@ -78,15 +85,19 @@ type SearchIndexSync struct{}
 
 func (s *SearchIndexSync) Handle(ctx context.Context, event ChangeEvent) error {
 	switch event.Operation {
-	case "insert", "update":
+	case "c", "u", "r":
+		// "r" (read/snapshot) HARUS ditangani sama seperti insert biasa —
+		// tanpa ini, data yang sudah ada di tabel SEBELUM CDC dipasang
+		// tidak akan pernah masuk ke index, hanya perubahan berikutnya.
 		return indexDocument(ctx, event.Table, event.After)
-	case "delete":
+	case "d":
 		return removeFromIndex(ctx, event.Table, event.Before)
+	default:
+		return fmt.Errorf("cdc: operasi %q pada tabel %s tidak dikenali", event.Operation, event.Table)
 	}
-	return nil
 }
 
-func indexDocument(ctx context.Context, table string, data map[string]any) error { return nil }
+func indexDocument(ctx context.Context, table string, data map[string]any) error   { return nil }
 func removeFromIndex(ctx context.Context, table string, data map[string]any) error { return nil }
 ```
 

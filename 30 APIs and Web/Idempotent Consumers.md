@@ -103,7 +103,9 @@ func prosesEventPermohonan(ctx context.Context, db *sql.DB, eventID string, perm
 }
 ```
 
-`INSERT` ke `log_pesan_diproses` dan `UPDATE` status permohonan terjadi dalam satu transaksi — kalau salah satu gagal, `defer tx.Rollback()` membatalkan keduanya, menjaga konsistensi antara "pesan tercatat diproses" dan "efek samping benar-benar terjadi".
+`INSERT` ke `log_pesan_diproses` dan `UPDATE` status permohonan terjadi dalam satu transaksi — kalau salah satu gagal, `defer tx.Rollback()` membatalkan keduanya, menjaga konsistensi antara "pesan tercatat diproses" dan "efek samping benar-benar terjadi". Kode di atas memakai PostgreSQL (`$1`, kode error `23505`). Di MariaDB/MySQL, placeholder-nya `?` dan duplicate key dilaporkan sebagai error nomor `1062`, yang dibaca lewat `*mysql.MySQLError` dari `go-sql-driver/mysql`.
+
+Batas pola ini perlu dipahami, karena ia menjawab separuh masalah di bagian The Problem. Transaksi database hanya bisa membuat efek samping **di dalam database yang sama** menjadi tepat sekali. Mengirim email, memanggil API partner, atau publish ke broker lain berada di luar transaksi itu. Kalau email dikirim sebelum `COMMIT`, crash sesudah pengiriman akan menghasilkan email ganda saat pesan diproses ulang. Kalau dikirim sesudah `COMMIT`, crash di antaranya membuat email tidak pernah terkirim. Pilihan yang jujur untuk efek samping eksternal ada tiga: teruskan idempotency key ke penyedia email atau API kalau mereka mendukungnya; catat "email perlu dikirim" di tabel dalam transaksi yang sama lalu kirim lewat worker terpisah ([[The Transactional Outbox Pattern]]), yang tetap at-least-once; atau terima duplikat yang sangat jarang sebagai biaya yang disadari untuk efek samping yang tidak kritis.
 
 ## In His Stack
 

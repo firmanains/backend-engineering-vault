@@ -14,11 +14,11 @@ created: 2026-07-29
 
 ## TL;DR
 
-[[B+Tree Structure]] menjelaskan struktur yang dipakai hampir semua database relasional untuk index. Struktur itu dioptimalkan untuk **baca** cepat, tapi setiap penulisan berarti mencari lokasi yang tepat di dalam pohon dan mengubahnya di tempat (*in-place update*) — sebuah pola akses disk yang acak. LSM-Tree (Log-Structured Merge-Tree) mengambil pendekatan yang secara filosofis terbalik: alih-alih mengubah data di tempat, setiap penulisan baru **selalu ditambahkan** secara berurutan (append-only) ke struktur di memori, yang secara berkala di-flush dan digabung (*merge*) ke disk dalam batch. Ini menukar kompleksitas tambahan saat membaca (data yang sama mungkin tersebar di beberapa lokasi, perlu digabung saat dicari) demi throughput tulis yang jauh lebih tinggi. Ini bukan struktur data yang "lebih baru dan lebih baik" dari B-Tree — ia mengoptimalkan trade-off baca/tulis ke arah yang berlawanan.
+[[B+Tree Structure]] menjelaskan struktur yang dipakai hampir semua database relasional untuk index. Struktur itu dioptimalkan untuk **baca** cepat. Setiap penulisan berarti mencari halaman yang tepat di dalam pohon dan mengubahnya di tempat (*in-place update*). Selama halaman-halaman yang disentuh tersebar acak dan tidak muat di memori, itu berarti I/O disk acak. LSM-Tree (Log-Structured Merge-Tree) mengambil pendekatan yang secara filosofis terbalik: alih-alih mengubah data di tempat, setiap penulisan baru **selalu ditambahkan** secara berurutan (append-only) ke struktur di memori, yang secara berkala di-flush dan digabung (*merge*) ke disk dalam batch. Ini menukar kompleksitas tambahan saat membaca (data yang sama mungkin tersebar di beberapa lokasi, perlu digabung saat dicari) demi throughput tulis yang jauh lebih tinggi. Ini bukan struktur data yang "lebih baru dan lebih baik" dari B-Tree — ia mengoptimalkan trade-off baca/tulis ke arah yang berlawanan.
 
 ## The Problem
 
-Sebuah sistem logging yang mencatat setiap aksi pengguna di 13 aplikasi menerima puluhan ribu penulisan per detik di jam sibuk — volume tulis yang jauh melebihi kebutuhan baca (log jarang dibaca ulang, kecuali untuk investigasi insiden yang jarang terjadi). Database berbasis B-Tree (MariaDB/InnoDB) yang dipakai untuk data transaksional lain mulai menunjukkan tekanan nyata saat menangani volume tulis logging ini. Setiap `INSERT` memaksa pencarian lokasi yang tepat di B+Tree index (termasuk kemungkinan node split, dibahas di [[B+Tree Structure]]), yang berarti operasi disk **acak** (random I/O) untuk setiap baris baru yang masuk, bukan operasi berurutan yang jauh lebih murah.
+Sebuah sistem logging yang mencatat setiap aksi pengguna di 13 aplikasi menerima puluhan ribu penulisan per detik di jam sibuk — volume tulis yang jauh melebihi kebutuhan baca (log jarang dibaca ulang, kecuali untuk investigasi insiden yang jarang terjadi). Database berbasis B-Tree (MariaDB/InnoDB) yang dipakai untuk data transaksional lain mulai menunjukkan tekanan nyata saat menangani volume tulis logging ini. Tekanannya bukan dari primary key: dengan `AUTO_INCREMENT`, baris baru selalu masuk ke ujung kanan clustered index, pola yang hampir berurutan. Masalahnya ada di secondary index. Tabel log biasanya punya index di `user_id` atau `aplikasi_id`, dan setiap baris baru harus disisipkan ke posisi yang tersebar acak di index-index itu. Begitu index tumbuh melebihi buffer pool, sisipan acak itu berubah menjadi baca dan tulis halaman acak ke disk, ditambah node split (dibahas di [[B+Tree Structure]]).
 
 Pertanyaannya: kalau pola akses yang dominan adalah **tulis jauh lebih sering daripada baca**, dan sebagian besar data yang ditulis jarang sekali dibaca ulang secara individual, apakah ada struktur data yang dirancang khusus untuk pola ini? Struktur yang menerima tulisan secepat mungkin, bahkan kalau itu berarti pembacaan sesekali jadi sedikit lebih kompleks. Jawabannya adalah LSM-Tree, struktur yang mendasari banyak database yang secara eksplisit dioptimalkan untuk beban tulis tinggi (RocksDB, Cassandra, dan komponen storage di banyak sistem time-series/logging modern).
 
@@ -59,18 +59,22 @@ Trade-off ini kenapa banyak sistem embedded key-value store (RocksDB, LevelDB) d
 package logstore
 
 import (
-	"context"
-	"fmt"
+	"slices"
 	"sync"
 )
 
-// MemtableSederhana mendemonstrasikan PRINSIP inti LSM-Tree, bukan
-// implementasi produksi — struktur di memori yang menerima tulisan
-// secepat mungkin (append), tanpa pencarian lokasi kompleks di setiap
-// tulisan seperti yang dibutuhkan struktur B-Tree.
+// Entri adalah satu pasangan key-value yang siap ditulis ke SSTable.
+type Entri struct {
+	Key   string
+	Value string
+}
+
+// MemtableSederhana mendemonstrasikan prinsip inti LSM-Tree, bukan
+// implementasi produksi: struktur di memori yang menerima tulisan secepat
+// mungkin, tanpa mencari lokasi di disk untuk setiap tulisan.
 type MemtableSederhana struct {
-	mu   sync.Mutex
-	data map[string]string
+	mu         sync.Mutex
+	data       map[string]string
 	ukuranMaks int
 }
 
@@ -78,11 +82,10 @@ func NewMemtableSederhana(ukuranMaks int) *MemtableSederhana {
 	return &MemtableSederhana{data: make(map[string]string), ukuranMaks: ukuranMaks}
 }
 
-// Tulis menambahkan key-value ke memtable — operasi CEPAT karena hanya
-// menulis ke struktur di memori, tanpa pencarian lokasi disk sama sekali.
-// Dalam LSM-Tree sungguhan, ini juga dibarengi tulisan sinkron ke WAL
-// untuk durability (diringkas di sini untuk fokus pada konsep memtable).
-func (m *MemtableSederhana) Tulis(ctx context.Context, key, value string) (butuhFlush bool) {
+// Tulis menambahkan key-value ke memtable. Operasi ini cepat karena hanya
+// menyentuh memori. LSM-Tree sungguhan juga menulis entri yang sama ke WAL
+// di disk (berurutan) sebelum menganggap tulisan sukses.
+func (m *MemtableSederhana) Tulis(key, value string) (butuhFlush bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -90,10 +93,9 @@ func (m *MemtableSederhana) Tulis(ctx context.Context, key, value string) (butuh
 	return len(m.data) >= m.ukuranMaks
 }
 
-// Baca mencari key HANYA di memtable saat ini — implementasi sungguhan
-// juga harus memeriksa SSTable di disk kalau key tidak ditemukan di sini,
-// dari yang terbaru ke terlama, sampai ditemukan atau semua sudah diperiksa.
-func (m *MemtableSederhana) Baca(ctx context.Context, key string) (string, bool) {
+// Baca hanya mencari di memtable. Implementasi sungguhan lanjut memeriksa
+// SSTable di disk kalau key tidak ada di sini, dari yang terbaru ke terlama.
+func (m *MemtableSederhana) Baca(key string) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -101,24 +103,37 @@ func (m *MemtableSederhana) Baca(ctx context.Context, key string) (string, bool)
 	return nilai, ada
 }
 
-// Flush "membekukan" memtable saat ini menjadi kandidat SSTable, dan
-// mengosongkan memtable untuk menerima tulisan berikutnya. Implementasi
-// sungguhan menulis data yang sudah terurut ke file immutable di disk
-// pada titik ini.
-func (m *MemtableSederhana) Flush() map[string]string {
+// Flush mengosongkan memtable dan mengembalikan isinya dalam keadaan
+// terurut berdasarkan key. Urutan inilah yang membuat SSTable bisa dicari
+// dengan binary search dan digabung dengan SSTable lain lewat merge
+// berurutan saat compaction. Memtable produksi memakai struktur yang sudah
+// terurut (skip list); map dipakai di sini hanya supaya contohnya ringkas.
+func (m *MemtableSederhana) Flush() []Entri {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	dataLama := m.data
+	lama := m.data
 	m.data = make(map[string]string)
-	fmt.Printf("flush %d entri ke SSTable baru\n", len(dataLama))
-	return dataLama
+	m.mu.Unlock()
+
+	hasil := make([]Entri, 0, len(lama))
+	for k, v := range lama {
+		hasil = append(hasil, Entri{Key: k, Value: v})
+	}
+	slices.SortFunc(hasil, func(a, b Entri) int {
+		if a.Key < b.Key {
+			return -1
+		}
+		if a.Key > b.Key {
+			return 1
+		}
+		return 0
+	})
+	return hasil
 }
 ```
 
 ## In His Stack
 
-Kafka, meski bukan database dalam pengertian tradisional, memakai prinsip filosofis yang sangat mirip LSM-Tree di level penyimpanan log-nya. Setiap pesan ditambahkan secara sekuensial (append-only) ke segment log di disk, tidak pernah diubah di tempat, dan pembersihan data lama terjadi lewat mekanisme retensi/compaction terpisah, bukan penghapusan baris satu per satu. Memahami LSM-Tree membantu memahami kenapa Kafka bisa mencapai throughput tulis yang sangat tinggi — akar filosofisnya (append-only, sekuensial) sama dengan yang membuat LSM-Tree unggul untuk beban tulis berat. Elasticsearch juga memakai struktur penyimpanan berbasis segment yang immutable dengan proses merge berkala, prinsip yang lagi-lagi mengingatkan pada LSM-Tree meski detail implementasinya (Lucene segments) berbeda.
+Kafka, meski bukan database dalam pengertian tradisional, memakai prinsip filosofis yang sangat mirip LSM-Tree di level penyimpanan log-nya. Setiap pesan ditambahkan secara sekuensial (append-only) ke segment log di disk, tidak pernah diubah di tempat, dan pembersihan data lama terjadi lewat mekanisme retensi/compaction terpisah, bukan penghapusan baris satu per satu. Memahami LSM-Tree membantu memahami kenapa Kafka bisa mencapai throughput tulis yang sangat tinggi — akar filosofisnya (append-only, sekuensial) sama dengan yang membuat LSM-Tree unggul untuk beban tulis berat. Elasticsearch juga memakai struktur penyimpanan berbasis segment yang immutable dengan proses merge berkala, prinsip yang lagi-lagi mengingatkan pada LSM-Tree meski detail implementasinya (Lucene segments) berbeda. Di ekosistem MariaDB sendiri, LSM-Tree tersedia sebagai storage engine MyRocks (berbasis RocksDB), sehingga tabel log bervolume tulis tinggi bisa memakai LSM tanpa meninggalkan SQL dan tooling MariaDB yang sudah dikenal tim.
 
 ## Trade-offs and When Not To Use It
 

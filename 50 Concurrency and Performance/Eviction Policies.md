@@ -46,10 +46,7 @@ flowchart TD
 
 **Redis** mendukung beberapa kebijakan eviction yang bisa dikonfigurasi (`maxmemory-policy`), termasuk variasi yang hanya berlaku untuk key dengan TTL (`volatile-lru`, `volatile-lfu`) versus yang berlaku untuk **seluruh** key termasuk yang tanpa TTL (`allkeys-lru`, `allkeys-lfu`) — pemilihan varian ini penting: memakai kebijakan `volatile-*` pada cache yang punya banyak key **tanpa** TTL berarti key-key itu tidak pernah menjadi kandidat eviction sama sekali, berpotensi membuat Redis tetap kehabisan memori meski kebijakan eviction sudah aktif, karena eviction hanya "melihat" key yang punya TTL.
 
-> [!question] Perlu diverifikasi
-> Klaim: nama parameter konfigurasi Redis (`maxmemory-policy`) dan opsi-opsinya (`volatile-lru`, `allkeys-lru`, dst.).
-> Kenapa ragu: nama dan opsi konfigurasi bisa bertambah/berubah antar versi Redis; perlu dicek terhadap versi yang relevan.
-> Cara verifikasi: dokumentasi resmi Redis mengenai "Eviction Policies" (redis.io/docs).
+Dua detail perilaku Redis yang sering mengejutkan. Pertama, default-nya **tidak melakukan eviction sama sekali**: `maxmemory-policy` bawaan adalah `noeviction`, sehingga begitu `maxmemory` tercapai, Redis menolak perintah tulis dengan error OOM alih-alih membuang key lama. Tanpa `maxmemory` (nilai `0` di sistem 64-bit), tidak ada batas sama sekali dan Redis tumbuh sampai RAM server habis. Kedua, LRU dan LFU di Redis adalah **aproksimasi**: Redis tidak melacak urutan akses seluruh key, melainkan mengambil sampel beberapa key (diatur `maxmemory-samples`) dan membuang yang terbaik di antara sampel itu. LFU di Redis (sejak versi 4.0) juga sudah memakai peluruhan: counter frekuensi berkurang seiring waktu tanpa akses (diatur `lfu-decay-time`). Daftar kebijakan persisnya bisa bertambah antar versi, jadi cocokkan dengan dokumentasi eviction untuk versi Redis yang kamu jalankan.
 
 ## In Go
 
@@ -58,9 +55,11 @@ package cache
 
 import "container/list"
 
-// LRUCacheSederhana mendemonstrasikan PRINSIP LRU — implementasi
-// produksi nyata biasanya memakai library matang (atau Redis itu
-// sendiri) yang sudah teruji dan thread-safe.
+// LRUCacheSederhana mendemonstrasikan prinsip LRU. Versi ini TIDAK aman
+// dipakai banyak goroutine. Perhatikan bahwa Ambil pun mengubah struktur
+// data (MoveToFront), jadi versi konkuren butuh sync.Mutex biasa untuk
+// baca maupun tulis; RWMutex tidak membantu di sini. Implementasi produksi
+// biasanya memakai library matang atau Redis itu sendiri.
 type LRUCacheSederhana struct {
 	kapasitas int
 	items     map[string]*list.Element
@@ -137,7 +136,7 @@ LRU dan LFU keduanya menambah overhead komputasi kecil untuk melacak metadata (w
 
 > [!success]- Kunci jawaban
 > **1.** LRU membuang entri berdasarkan **kapan terakhir** entri itu diakses — entri yang sudah lama tidak disentuh dibuang lebih dulu, tidak peduli seberapa sering ia diakses di masa lalu. LFU membuang entri berdasarkan **seberapa sering** entri itu diakses secara total sepanjang waktu — entri yang jarang diakses secara kumulatif dibuang lebih dulu, meski mungkin baru saja diakses sekali.
-> **4.** Skenario campuran ini sebenarnya adalah kasus klasik yang menunjukkan keterbatasan LRU murni maupun LFU murni: LRU murni berisiko membuang data pencarian populer konsisten ("status permohonan aktif") hanya karena kebetulan tidak diakses dalam beberapa menit terakhir, padahal secara historis dan proyeksi ke depan ia akan terus sering diakses. LFU murni berisiko "terlalu lambat" mengakomodasi tren baru yang sedang ramai (frekuensi kumulatifnya masih rendah karena baru mulai populer) sementara data lama yang sudah tidak relevan tapi frekuensi historisnya tinggi tetap dipertahankan. Kombinasi **LFU dengan peluruhan waktu** (time-decayed LFU, tersedia di beberapa sistem cache modern) — di mana skor frekuensi lama-kelamaan "meluruh" nilainya kalau tidak terus diakses — memberi keseimbangan yang lebih baik: data yang konsisten populer tetap dilindungi (frekuensi tinggi bertahan lama), sementara data yang sudah tidak relevan (meski dulu sempat sering diakses) perlahan kehilangan perlindungannya seiring waktu tanpa akses baru, dan tren baru yang sedang naik daun bisa cepat membangun skor frekuensinya sendiri tanpa harus menunggu terlalu lama.
+> **4.** Skenario campuran ini sebenarnya adalah kasus klasik yang menunjukkan keterbatasan LRU murni maupun LFU murni: LRU murni berisiko membuang data pencarian populer konsisten ("status permohonan aktif") hanya karena kebetulan tidak diakses dalam beberapa menit terakhir, padahal secara historis dan proyeksi ke depan ia akan terus sering diakses. LFU murni berisiko "terlalu lambat" mengakomodasi tren baru yang sedang ramai (frekuensi kumulatifnya masih rendah karena baru mulai populer) sementara data lama yang sudah tidak relevan tapi frekuensi historisnya tinggi tetap dipertahankan. Kombinasi **LFU dengan peluruhan waktu** (time-decayed LFU; `allkeys-lfu` di Redis sudah bekerja seperti ini lewat `lfu-decay-time`) — di mana skor frekuensi lama-kelamaan "meluruh" nilainya kalau tidak terus diakses — memberi keseimbangan yang lebih baik: data yang konsisten populer tetap dilindungi (frekuensi tinggi bertahan lama), sementara data yang sudah tidak relevan (meski dulu sempat sering diakses) perlahan kehilangan perlindungannya seiring waktu tanpa akses baru, dan tren baru yang sedang naik daun bisa cepat membangun skor frekuensinya sendiri tanpa harus menunggu terlalu lama.
 
 ## Self-Check
 

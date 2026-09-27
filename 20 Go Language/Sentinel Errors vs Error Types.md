@@ -126,7 +126,10 @@ flowchart LR
 ```go
 package integrasi
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrorAPIPartner adalah error type yang membawa detail respons dari
 // partner eksternal — informasi yang SANGAT spesifik per kejadian
@@ -146,7 +149,7 @@ func (e *ErrorAPIPartner) Error() string {
 // itu sendiri sudah cukup deskriptif tanpa perlu data tambahan spesifik
 // (durasi timeout biasanya sudah diketahui dari konfigurasi, tidak perlu
 // disertakan di error itu sendiri).
-var ErrPartnerTimeout = fmt.Errorf("request ke partner timeout")
+var ErrPartnerTimeout = errors.New("request ke partner timeout")
 
 func PanggilPartner(url string) error {
 	// ... panggilan HTTP ...

@@ -48,12 +48,18 @@ Diagram ini menunjukkan 51 round-trip total untuk data yang bisa didapat dalam s
 **Solusi 1 — `JOIN` dengan agregasi:**
 ```sql
 SELECT p.id, p.nomor_permohonan, COUNT(d.id) AS jumlah_dokumen
-FROM permohonan p
+FROM (
+    SELECT id, nomor_permohonan, tanggal_dibuat
+    FROM permohonan
+    ORDER BY tanggal_dibuat DESC
+    LIMIT 50
+) AS p
 LEFT JOIN dokumen d ON d.permohonan_id = p.id
-GROUP BY p.id, p.nomor_permohonan
-ORDER BY p.tanggal_dibuat DESC
-LIMIT 50;
+GROUP BY p.id, p.nomor_permohonan, p.tanggal_dibuat
+ORDER BY p.tanggal_dibuat DESC;
 ```
+
+`LIMIT` sengaja diletakkan di dalam subquery. Versi yang lebih "polos" (`JOIN` seluruh tabel, `GROUP BY`, baru `LIMIT 50` di akhir) memaksa database menghitung jumlah dokumen untuk **semua** permohonan sebelum membuang semuanya kecuali 50. Pada tabel kecil perbedaannya tidak terasa; pada jutaan baris, versi polos itu bisa lebih lambat daripada N+1 yang hendak diperbaiki.
 
 **Solusi 2 — dua query, satu untuk induk, satu untuk seluruh anak sekaligus (dikenal sebagai *eager loading* atau *batch loading*):**
 ```sql
@@ -80,6 +86,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 type Permohonan struct {
@@ -105,6 +112,9 @@ func AmbilPermohonanNaif(ctx context.Context, db *sql.DB) ([]Permohonan, error) 
 			return nil, fmt.Errorf("scan permohonan: %w", err)
 		}
 		daftar = append(daftar, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi permohonan: %w", err)
 	}
 
 	// JEBAKAN: query terpisah di dalam loop — inilah "+N" dari N+1.
@@ -138,6 +148,9 @@ func AmbilPermohonanBatch(ctx context.Context, db *sql.DB) ([]Permohonan, error)
 		idKeIndeks[p.ID] = len(daftar)
 		daftar = append(daftar, p)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi permohonan: %w", err)
+	}
 	if len(daftar) == 0 {
 		return daftar, nil
 	}
@@ -151,7 +164,7 @@ func AmbilPermohonanBatch(ctx context.Context, db *sql.DB) ([]Permohonan, error)
 
 	query := fmt.Sprintf(
 		`SELECT permohonan_id, COUNT(*) FROM dokumen WHERE permohonan_id IN (%s) GROUP BY permohonan_id`,
-		joinPlaceholder(placeholder),
+		strings.Join(placeholder, ", "),
 	)
 	hitungRows, err := db.QueryContext(ctx, query, ids...)
 	if err != nil {
@@ -169,21 +182,18 @@ func AmbilPermohonanBatch(ctx context.Context, db *sql.DB) ([]Permohonan, error)
 			daftar[idx].JumlahDokumen = jumlah
 		}
 	}
-	return daftar, nil
-}
-
-func joinPlaceholder(ph []string) string {
-	hasil := ph[0]
-	for _, p := range ph[1:] {
-		hasil += ", " + p
+	if err := hitungRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi batch jumlah dokumen: %w", err)
 	}
-	return hasil
+	return daftar, nil
 }
 ```
 
 ## In His Stack
 
 Yii2 Active Record menyediakan `with()` untuk eager loading eksplisit (`Permohonan::find()->with('dokumen')->all()`) yang secara internal memakai pola batch loading serupa contoh Go di atas — tapi jebakan N+1 tetap sangat umum di codebase Yii2 justru karena `with()` harus **diingat** dipakai secara sadar; kode yang mengakses relasi lewat `$model->dokumen` tanpa `with()` sebelumnya diam-diam jatuh kembali ke lazy loading satu-per-satu, dan kode itu terlihat **identik** baik dengan atau tanpa `with()` — perbedaannya hanya terlihat dari query log atau profiling, bukan dari membaca kode itu sendiri. Ini salah satu alasan kenapa slow query log dan APM (lihat [[../70 Infrastructure and Delivery/The Three Pillars of Observability|The Three Pillars of Observability]]) penting dipasang bahkan untuk endpoint yang "terlihat sudah dioptimasi" di level kode.
+
+Ada satu jebakan Yii2 yang khusus. `$p->getDokumen()` mengembalikan objek `ActiveQuery` baru, sehingga `$p->getDokumen()->count()` **selalu** menjalankan query, bahkan setelah `with('dokumen')`. Yang memakai hasil eager loading adalah properti relasinya: `count($p->dokumen)`. Tapi memuat semua dokumen hanya untuk menghitungnya juga boros. Untuk hitungan, lebih tepat memakai agregasi di query induk (`joinWith('dokumen')` + `groupBy` + `COUNT`, atau subquery `COUNT` di `select()`).
 
 ## Trade-offs and When Not To Use It
 

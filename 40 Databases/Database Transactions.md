@@ -21,6 +21,8 @@ Transaction adalah sekelompok operasi database yang harus dianggap sebagai **sat
 Sebuah fungsi "transfer saldo antar rekening" ditulis sebagai dua `UPDATE` terpisah, tanpa transaction:
 
 ```go
+// SALAH: dua statement terpisah, masing-masing di-commit sendiri
+// (error juga diabaikan, supaya fokus contoh ini tetap pada atomicity).
 db.ExecContext(ctx, "UPDATE rekening SET saldo = saldo - ? WHERE id = ?", jumlah, rekeningAsal)
 db.ExecContext(ctx, "UPDATE rekening SET saldo = saldo + ? WHERE id = ?", jumlah, rekeningTujuan)
 ```
@@ -74,10 +76,12 @@ sequenceDiagram
 
 Diagram ini menekankan poin paling penting: `ROLLBACK` membatalkan **seluruh** perubahan sejak `START TRANSACTION`, bukan hanya operasi terakhir — itulah yang membuat transfer saldo aman dari kegagalan parsial.
 
+Satu perbedaan dialek menentukan seberapa penting `ROLLBACK` eksplisit itu. Di **PostgreSQL**, satu statement yang error membuat seluruh transaction masuk keadaan gagal: statement berikutnya ditolak dengan pesan *current transaction is aborted* sampai `ROLLBACK` dijalankan. Di **MySQL/MariaDB**, statement yang error umumnya hanya membatalkan **statement itu sendiri**; transaction tetap terbuka, dan perubahan sebelumnya masih ada. Aplikasi yang mengabaikan error lalu memanggil `COMMIT` di MariaDB akan menyimpan setengah pekerjaan, persis kegagalan yang ingin dicegah. Karena itu, setiap error di dalam transaction harus berujung pada `ROLLBACK`, bukan diabaikan. Satu jebakan MariaDB lagi: statement DDL (`ALTER TABLE`, `CREATE TABLE`) melakukan commit implisit atas transaction yang sedang berjalan.
+
 ## In Go
 
 ```go
-package main
+package repository
 
 import (
 	"context"

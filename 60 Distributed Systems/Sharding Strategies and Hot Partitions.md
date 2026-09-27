@@ -73,11 +73,17 @@ func HashBasedShard(caseID string, totalShards int) int {
 	return int(n % uint64(totalShards))
 }
 
-// DirectoryBasedShard menunjukkan fleksibilitas lookup EKSPLISIT —
-// rebalancing cukup ubah entri di sini, TANPA menghitung ulang hash
+// DirectoryBasedShard menunjukkan fleksibilitas lookup eksplisit:
+// rebalancing cukup mengubah entri di sini, tanpa menghitung ulang hash
 // untuk seluruh data yang sudah ada.
 type ShardDirectory struct {
 	assignments map[string]int // caseID -> shard number
+}
+
+// NewShardDirectory wajib dipakai, bukan ShardDirectory{} kosong — struct
+// nol punya map nil, dan menulis ke map nil lewat Reassign akan panic.
+func NewShardDirectory() *ShardDirectory {
+	return &ShardDirectory{assignments: make(map[string]int)}
 }
 
 func (d *ShardDirectory) ShardFor(caseID string) (int, bool) {

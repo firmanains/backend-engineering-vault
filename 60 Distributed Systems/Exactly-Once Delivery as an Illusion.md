@@ -53,37 +53,55 @@ Prinsip yang lebih jujur dan lebih aman dipakai sebagai default desain: **efek s
 ```go
 package delivery
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
-// AtLeastOnceHandler menunjukkan sikap desain yang BENAR:
-// mengasumsikan pesan BISA datang lebih dari sekali, TERLEPAS dari
-// klaim jaminan sistem messaging yang dipakai di baliknya.
+// ProcessedStore harus melakukan pengecekan-dan-penandaan secara ATOMIK
+// (misalnya lewat INSERT dengan constraint UNIQUE, seperti dibahas di
+// [[Idempotency Keys]]). Memeriksa "sudah diproses?" lalu menandai
+// "sudah diproses" sebagai DUA operasi terpisah membuka race yang sama
+// persis dengan yang dibahas di note itu: dua pengiriman pesan yang sama,
+// datang hampir bersamaan, bisa lolos pengecekan sebelum salah satu
+// sempat menandainya.
+type ProcessedStore interface {
+	// ClaimIfNew mengembalikan true kalau messageID berhasil DIKLAIM
+	// (belum pernah diproses), atau false kalau sudah ada klaim
+	// sebelumnya untuk messageID ini. Operasi ini harus atomik.
+	ClaimIfNew(ctx context.Context, messageID string) (claimed bool, err error)
+}
+
+// AtLeastOnceHandler menunjukkan sikap desain yang benar: mengasumsikan
+// pesan bisa datang lebih dari sekali, terlepas dari klaim jaminan sistem
+// messaging yang dipakai di baliknya.
 type AtLeastOnceHandler struct {
 	Seen ProcessedStore
 }
 
-type ProcessedStore interface {
-	AlreadyProcessed(ctx context.Context, messageID string) (bool, error)
-	MarkProcessed(ctx context.Context, messageID string) error
-}
-
-// Handle TIDAK PERNAH berasumsi "sistem messaging saya menjamin
-// exactly-once, jadi saya tidak perlu memeriksa duplikasi" — asumsi
-// itu adalah akar masalah di "The Problem".
+// Handle tidak pernah berasumsi "sistem messaging saya menjamin
+// exactly-once, jadi saya tidak perlu memeriksa duplikasi" — asumsi itu
+// adalah akar masalah di "The Problem".
 func (h *AtLeastOnceHandler) Handle(ctx context.Context, messageID string, process func(ctx context.Context) error) error {
-	seen, err := h.Seen.AlreadyProcessed(ctx, messageID)
+	claimed, err := h.Seen.ClaimIfNew(ctx, messageID)
 	if err != nil {
-		return err
+		return fmt.Errorf("klaim pesan %q: %w", messageID, err)
 	}
-	if seen {
-		return nil // SUDAH diproses — lewati, JANGAN ulangi efek samping
+	if !claimed {
+		return nil // sudah diklaim (sedang atau sudah diproses) — lewati
 	}
 
 	if err := process(ctx); err != nil {
-		return err
+		// Klaim TIDAK dibatalkan di sini. Kalau process gagal karena efek
+		// sampingnya sebagian sudah terjadi (email sudah terkirim sebelum
+		// error jaringan saat mencatat hasilnya), membatalkan klaim akan
+		// membuka pintu bagi percobaan berikutnya mengirim email lagi —
+		// persis duplikasi yang ingin dicegah. Kegagalan di sini butuh
+		// investigasi manual atau retry dengan proses yang sendirinya
+		// idempotent, bukan penghapusan klaim otomatis.
+		return fmt.Errorf("proses pesan %q: %w", messageID, err)
 	}
-
-	return h.Seen.MarkProcessed(ctx, messageID)
+	return nil
 }
 ```
 

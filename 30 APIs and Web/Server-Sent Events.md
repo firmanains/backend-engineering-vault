@@ -20,7 +20,7 @@ created: 2026-08-02
 
 Dashboard petugas legal-services di note [[WebSocket]] butuh notifikasi real-time, tapi setelah dianalisis lebih lanjut, arah komunikasinya sebenarnya cuma satu: server memberi tahu client saat ada permohonan baru atau status berubah. Client tidak pernah perlu mengirim pesan balik lewat koneksi notifikasi itu sendiri — aksi seperti "tandai sudah dibaca" tetap bisa lewat request HTTP biasa terpisah, bukan lewat koneksi real-time itu.
 
-Memilih WebSocket untuk kasus yang sebenarnya satu arah berarti membawa semua kompleksitas WebSocket (handshake upgrade khusus, load balancer yang harus sadar sticky session, firewall korporat yang kadang memblokir upgrade non-standar) untuk kemampuan dua arah yang tidak pernah dipakai. Tim butuh mekanisme push yang lebih sederhana, yang bisa lewat infrastruktur HTTP yang sudah ada tanpa konfigurasi tambahan.
+Memilih WebSocket untuk kasus yang sebenarnya satu arah berarti membawa semua kompleksitas WebSocket (handshake upgrade khusus, proxy yang harus dikonfigurasi mengizinkan upgrade, firewall korporat yang kadang memblokir upgrade non-standar) untuk kemampuan dua arah yang tidak pernah dipakai. Tim butuh mekanisme push yang lebih sederhana, yang bisa lewat infrastruktur HTTP yang sudah ada tanpa konfigurasi tambahan.
 
 ## Intuition
 
@@ -66,18 +66,23 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"time"
 )
 
 func handleEvents(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	rc := http.NewResponseController(w)
+
+	// Stream SSE sengaja berumur panjang. Tanpa baris ini, WriteTimeout
+	// milik http.Server (lihat Timeouts in HTTP Servers) akan memutus
+	// stream setelah beberapa detik. Deadline nol berarti tanpa batas,
+	// hanya untuk handler ini.
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
 		http.Error(w, "streaming tidak didukung", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 
 	// notifikasiUntukPetugas mengembalikan channel yang menerima
 	// pesan baru untuk petugas ini — sumbernya bisa dari pub/sub
@@ -93,14 +98,18 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", pesan)
-			flusher.Flush()
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", pesan); err != nil {
+				return // koneksi sudah putus di tengah penulisan
+			}
+			if err := rc.Flush(); err != nil {
+				return
+			}
 		}
 	}
 }
 ```
 
-Dua bagian yang wajib ada dan sering terlewat: `http.Flusher` untuk memaksa Go mengirim data yang sudah ditulis ke client segera, bukan menunggu buffer penuh, dan `r.Context().Done()` untuk mendeteksi kapan client memutus koneksi supaya goroutine yang menangani handler ini tidak menunggu selamanya — kebocoran goroutine yang sama persis dengan yang dibahas di [[Goroutine Leaks]] kalau ini terlewat.
+Tiga bagian yang wajib ada dan sering terlewat: menonaktifkan write deadline untuk handler ini (kalau tidak, `WriteTimeout` server memutus stream secara diam-diam), `Flush` untuk memaksa Go mengirim data yang sudah ditulis ke client segera, bukan menunggu buffer penuh, dan `r.Context().Done()` untuk mendeteksi kapan client memutus koneksi. `http.ResponseController` (Go 1.20+) dipakai untuk keduanya karena ia tetap bekerja meski `ResponseWriter` dibungkus middleware, sementara type assertion `w.(http.Flusher)` gagal kalau pembungkusnya tidak mengimplementasikan `Flusher` supaya goroutine yang menangani handler ini tidak menunggu selamanya — kebocoran goroutine yang sama persis dengan yang dibahas di [[Goroutine Leaks]] kalau ini terlewat.
 
 ## In His Stack
 
@@ -134,7 +143,7 @@ SSE unggul untuk notifikasi satu arah, live feed, progress bar proses panjang, a
 ## Self-Check
 
 - Apa perbedaan mendasar arah komunikasi antara SSE dan WebSocket?
-- Kenapa `http.Flusher` wajib dipanggil setelah menulis setiap event SSE di Go?
+- Kenapa `Flush` wajib dipanggil setelah menulis setiap event SSE di Go, dan kenapa write deadline handler SSE perlu dinonaktifkan?
 - Bagaimana client SSE bisa melanjutkan dari event terakhir setelah koneksi terputus dan tersambung lagi?
 
 ## Connected Notes

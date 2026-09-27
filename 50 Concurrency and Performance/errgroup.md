@@ -99,6 +99,21 @@ Diagram ini menunjukkan perilaku kunci `errgroup.WithContext`: begitu satu gorou
 
 `errgroup.Group` secara internal memakai `sync.WaitGroup` dan `sync.Once` (untuk memastikan hanya error **pertama** yang disimpan, error berikutnya diabaikan) — memberi abstraksi yang jauh lebih aman dari implementasi manual yang rawan lupa menangani salah satu kasus tepi (misalnya lupa menangani race condition saat beberapa goroutine sama-sama mencoba menyimpan error mereka ke variabel bersama tanpa sinkronisasi). `g.Go(func)` bisa dipanggil kapan saja sebelum `g.Wait()`, termasuk dari dalam goroutine lain yang sedang berjalan — memungkinkan pola dinamis di mana jumlah goroutine yang diluncurkan tidak perlu diketahui sepenuhnya di awal.
 
+**`g.SetLimit(n)`** membatasi jumlah goroutine aktif di dalam group. Setelah batas tercapai, pemanggilan `g.Go` berikutnya **memblokir** sampai salah satu goroutine selesai. Ini membuat `errgroup` sekaligus menjadi worker pool sederhana: satu goroutine per item tetap aman dipakai untuk daftar panjang, karena yang benar-benar berjalan bersamaan tidak pernah lebih dari `n`. `SetLimit` harus dipanggil sebelum goroutine pertama diluncurkan.
+
+```go
+g, ctx := errgroup.WithContext(ctx)
+g.SetLimit(10) // paling banyak 10 panggilan ke partner bersamaan
+for _, nik := range daftarNIK {
+    g.Go(func() error { // Go 1.22+: nik aman ditangkap per iterasi
+        return verifikasiNIK(ctx, nik)
+    })
+}
+if err := g.Wait(); err != nil {
+    return fmt.Errorf("verifikasi NIK: %w", err)
+}
+```
+
 ## In Go
 
 ```go
@@ -163,7 +178,7 @@ func validasiTidakDuplikat(ctx context.Context, id int64) error  { return nil }
 
 > [!success]- Kunci jawaban
 > **1.** `errgroup.Group` menyimpan **error pertama** yang terjadi (ditentukan oleh urutan mana yang benar-benar selesai lebih dulu, bukan urutan `g.Go` dipanggil) — begitu error pertama tersimpan, error dari goroutine lain yang gagal setelahnya tidak disimpan sama sekali (diabaikan). `g.Wait()` hanya mengembalikan satu error itu, meski mungkin ada lebih dari satu goroutine yang sebenarnya gagal.
-> **4.** `errgroup` standar tidak cocok karena ia dirancang untuk mengumpulkan hanya error pertama, sementara kebutuhan ini butuh **seluruh** error dari kelima validasi. Pendekatan alternatif: luncurkan lima goroutine secara manual (mirip pola [[Fan-In Fan-Out]]) yang masing-masing mengirim hasilnya (nil kalau valid, error kalau tidak) ke sebuah channel bersama atau slice yang dilindungi mutex, tunggu seluruh lima goroutine selesai lewat `sync.WaitGroup` (bukan `errgroup`), lalu kumpulkan seluruh error yang tidak nil dari kelima hasil itu menjadi satu daftar gabungan untuk dikembalikan ke pengguna sekaligus. Trade-off: kode yang lebih verbose dibanding `errgroup`, tapi memberi kontrol penuh atas bagaimana kumpulan error ditangani, sesuatu yang memang di luar cakupan desain `errgroup` standar.
+> **4.** `errgroup` standar tidak cocok karena ia hanya menyimpan error pertama, sementara kebutuhan ini butuh **seluruh** error dari kelima validasi. Pendekatan alternatif: siapkan slice `errs := make([]error, 5)`, luncurkan lima goroutine yang masing-masing menulis hasilnya ke **indeksnya sendiri** (`errs[i] = validasiKe(i)`), tunggu dengan `sync.WaitGroup`, lalu gabungkan dengan `errors.Join(errs...)` (Go 1.20+), yang otomatis membuang nilai `nil`. Karena setiap goroutine menulis ke indeks yang berbeda dan pembacaan terjadi setelah `Wait`, tidak perlu mutex. Hasil `errors.Join` tetap bisa diperiksa dengan `errors.Is`/`errors.As` untuk setiap error di dalamnya. Pola yang sama bisa ditulis dengan `errgroup.Group` tanpa `WithContext` asalkan setiap fungsi selalu mengembalikan `nil` dan menaruh error-nya di slice, tapi `WaitGroup` biasa menyatakan maksudnya dengan lebih jujur.
 
 ## Self-Check
 

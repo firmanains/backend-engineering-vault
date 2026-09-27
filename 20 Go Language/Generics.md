@@ -36,9 +36,9 @@ package main
 import "fmt"
 
 // Constraint tipe: T harus salah satu dari tipe numerik atau string yang
-// mendukung operator pembanding (<, >). "constraints.Ordered" adalah
-// constraint umum yang sering dipakai (dari package golang.org/x/exp/constraints
-// atau didefinisikan manual seperti contoh di bawah).
+// mendukung operator pembanding (<, >). Didefinisikan manual di sini supaya
+// mekanismenya terlihat. Sejak Go 1.21, stdlib menyediakan cmp.Ordered yang
+// lebih lengkap, dan bahkan function bawaan max/min untuk kasus persis ini.
 type Ordered interface {
 	~int | ~int64 | ~float64 | ~string
 }
@@ -75,12 +75,7 @@ Diagram ini menunjukkan pergeseran inti: generics memindahkan pemeriksaan kebena
 
 ## Under The Hood
 
-Generics di Go diimplementasikan lewat pendekatan yang disebut **GC shape stenciling** — bukan generate kode terpisah untuk setiap tipe konkret secara naif (yang akan membengkakkan ukuran binary drastis), dan bukan pula murni lewat interface/boxing seperti beberapa bahasa lain (yang akan menambah overhead runtime signifikan). Go mengelompokkan tipe-tipe dengan "bentuk" memori yang identik (misalnya semua tipe pointer punya ukuran dan representasi yang sama) untuk berbagi satu implementasi kode mesin, sementara tipe dengan ukuran berbeda (`int32` vs `int64`, misalnya) mungkin tetap mendapat instansiasi kode terpisah — pendekatan hybrid yang menyeimbangkan ukuran binary dengan performa runtime.
-
-> [!question] Perlu diverifikasi
-> Klaim: detail mekanisme "GC shape stenciling" persis seperti dijelaskan di atas.
-> Kenapa ragu: ini adalah detail implementasi internal compiler Go yang cukup teknis dan berpotensi terus disempurnakan antar versi rilis Go.
-> Cara verifikasi: dokumentasi desain resmi Go tentang implementasi generics (proposal dan technical design doc di repository Go).
+Generics di Go diimplementasikan lewat pendekatan yang disebut **GC shape stenciling** — bukan generate kode terpisah untuk setiap tipe konkret secara naif (yang akan membengkakkan ukuran binary drastis), dan bukan pula murni lewat interface/boxing seperti beberapa bahasa lain (yang akan menambah overhead runtime signifikan). Go mengelompokkan tipe-tipe dengan "bentuk" memori (GC shape) yang identik untuk berbagi satu implementasi kode mesin. Misalnya, semua tipe pointer berbagi satu shape. Tipe dengan shape berbeda (`int32` vs `int64`, misalnya) mendapat instansiasi kode terpisah. Informasi yang berbeda antar tipe dalam satu shape (misalnya method mana yang harus dipanggil) dioper lewat *dictionary* tersembunyi saat runtime. Konsekuensi praktisnya: memanggil method pada parameter tipe yang berupa pointer atau interface bisa melewati indirection dictionary itu, sehingga kode generic tidak otomatis secepat kode yang ditulis tangan untuk satu tipe. Ini detail implementasi compiler yang bisa terus disempurnakan antar rilis; rujukannya adalah dokumen desain implementasi generics di repository Go.
 
 Penting dipahami: generics **tidak menggantikan** interface — keduanya menyelesaikan masalah berbeda. Interface (lihat [[Interfaces and Implicit Satisfaction]]) mendefinisikan **perilaku** yang harus dipenuhi tipe apa pun (polymorphism berbasis method). Generics mendefinisikan **hubungan tipe** antar parameter dan return value suatu fungsi/struct, memastikan compiler tahu tipe konkret apa yang sedang dipakai di setiap pemanggilan — keduanya sering dipakai bersama (constraint generics sering **adalah** sebuah interface).
 

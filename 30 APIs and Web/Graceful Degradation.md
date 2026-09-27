@@ -57,6 +57,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 )
 
 type DetailPermohonan struct {
@@ -87,8 +88,12 @@ func ambilDetailPermohonan(ctx context.Context, permohonanID string) (*DetailPer
 	}
 
 	// Rekomendasi dokumen OPSIONAL — kegagalan di sini bahkan tidak
-	// perlu dicatat sebagai warning tinggi, cukup diabaikan.
-	rekomendasi, err := ambilRekomendasi(ctx, permohonanID)
+	// perlu dicatat sebagai warning tinggi, cukup diabaikan. Ia juga
+	// diberi batas waktu sendiri yang pendek: layanan opsional yang
+	// LAMBAT (bukan gagal) tidak boleh menahan seluruh halaman.
+	ctxOpsional, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	rekomendasi, err := ambilRekomendasi(ctxOpsional, permohonanID)
 	if err == nil {
 		detail.RekomendasiDokumen = rekomendasi
 	}
@@ -97,7 +102,7 @@ func ambilDetailPermohonan(ctx context.Context, permohonanID string) (*DetailPer
 }
 ```
 
-Struktur kode ini secara eksplisit membedakan tiga tingkat esensialitas lewat cara masing-masing kegagalan ditangani: `return nil, err` untuk yang esensial (menggagalkan seluruhnya), log warning plus lanjut untuk yang penting, dan diam-diam diabaikan untuk yang opsional. Perbedaan penanganan ini **adalah** desain graceful degradation itu sendiri, bukan detail implementasi kecil.
+Struktur kode ini secara eksplisit membedakan tiga tingkat esensialitas lewat cara masing-masing kegagalan ditangani: `return nil, err` untuk yang esensial (menggagalkan seluruhnya), log warning plus lanjut untuk yang penting, dan diam-diam diabaikan untuk yang opsional. Perbedaan penanganan ini **adalah** desain graceful degradation itu sendiri, bukan detail implementasi kecil. Perhatikan juga bahwa degradasi harus mencakup **kelambatan**, bukan hanya kegagalan: tanpa timeout khusus untuk komponen opsional, layanan rekomendasi yang merespons dalam 20 detik tetap membuat halaman menunggu 20 detik, meski secara teknis tidak ada yang "gagal". Kalau komponen-komponen itu independen, memanggilnya secara paralel (misalnya dengan `errgroup`) juga memangkas total waktu tunggu.
 
 ## In His Stack
 

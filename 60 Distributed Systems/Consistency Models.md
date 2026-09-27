@@ -14,7 +14,7 @@ created: 2026-08-02
 
 ## TL;DR
 
-CAP theorem menyederhanakan consistency jadi satu pilihan biner (konsisten atau tidak), tapi kenyataannya consistency adalah **spektrum** dengan banyak tingkat jaminan berbeda di antaranya. **Linearizable** adalah yang paling ketat — setiap operasi terlihat terjadi secara instan di satu titik waktu, seolah-olah hanya ada satu salinan data di seluruh sistem. **Sequential** menjamin semua node melihat operasi dalam urutan yang sama, meski urutan itu tidak harus persis sesuai waktu nyata terjadinya. **Causal** hanya menjamin operasi yang punya hubungan sebab-akibat terlihat dalam urutan yang benar; operasi yang tidak berkaitan boleh terlihat berbeda urutan di node berbeda. **Eventual** hanya menjanjikan bahwa **kalau** tidak ada tulisan baru, semua node **akhirnya** akan konvergen ke nilai yang sama — tanpa jaminan kapan itu terjadi. Memilih model yang tepat untuk kebutuhan spesifik, bukan selalu memilih yang paling ketat, adalah keterampilan inti desain sistem terdistribusi.
+CAP theorem menyederhanakan consistency jadi satu pilihan biner (konsisten atau tidak), tapi kenyataannya consistency adalah **spektrum** dengan banyak tingkat jaminan berbeda di antaranya. **Linearizable** adalah yang paling ketat — setiap operasi terlihat terjadi secara instan di satu titik waktu, seolah-olah hanya ada satu salinan data di seluruh sistem. **Sequential** menjamin semua node melihat operasi dalam satu urutan yang sama, yang menghormati urutan operasi di masing-masing klien, meski urutan itu tidak harus sesuai waktu nyata terjadinya. **Causal** hanya menjamin operasi yang punya hubungan sebab-akibat terlihat dalam urutan yang benar; operasi yang tidak berkaitan boleh terlihat berbeda urutan di node berbeda. **Eventual** hanya menjanjikan bahwa **kalau** tidak ada tulisan baru, semua node **akhirnya** akan konvergen ke nilai yang sama — tanpa jaminan kapan itu terjadi. Memilih model yang tepat untuk kebutuhan spesifik, bukan selalu memilih yang paling ketat, adalah keterampilan inti desain sistem terdistribusi.
 
 ## The Problem
 
@@ -24,9 +24,9 @@ Masalah ini bukan bug di kode — sistem berfungsi persis sesuai jaminan yang di
 
 ## Intuition
 
-Cara paling mudah memahaminya: bayangkan spektrum consistency seperti **tingkat kepercayaan terhadap gosip** dalam sebuah kantor besar dengan banyak cabang. **Linearizable** seperti pengumuman resmi lewat pengeras suara yang didengar semua orang di semua cabang **pada saat yang sama persis** — tidak ada yang mendengar sebelum atau sesudah orang lain. **Sequential** seperti memo yang disebarkan dan dibaca semua cabang dalam urutan yang sama, meski cabang yang jauh membacanya sedikit lebih lambat. **Causal** seperti gosip yang menyebar secara alami — kalau si A memberi tahu si B, lalu si B menceritakannya ke si C, si C pasti mendengar dari si B **setelah** si B tahu dari si A (urutan sebab-akibat terjaga), tapi gosip yang sama sekali tidak berkaitan bisa sampai ke orang berbeda dalam urutan acak. **Eventual** seperti gosip yang pada akhirnya menyebar ke semua orang, entah kapan, tanpa jaminan urutan apa pun sepanjang jalan.
+Cara paling mudah memahaminya: bayangkan spektrum consistency seperti **tingkat kepercayaan terhadap gosip** dalam sebuah kantor besar dengan banyak cabang. **Linearizable** seperti satu papan pengumuman tunggal di lobi pusat yang harus didatangi semua orang: begitu seseorang sudah membaca versi baru, tidak ada orang yang datang sesudahnya yang masih bisa membaca versi lama. **Sequential** seperti memo yang disebarkan dan dibaca semua cabang dalam urutan yang sama, meski cabang yang jauh membacanya sedikit lebih lambat. **Causal** seperti gosip yang menyebar secara alami — kalau si A memberi tahu si B, lalu si B menceritakannya ke si C, si C pasti mendengar dari si B **setelah** si B tahu dari si A (urutan sebab-akibat terjaga), tapi gosip yang sama sekali tidak berkaitan bisa sampai ke orang berbeda dalam urutan acak. **Eventual** seperti gosip yang pada akhirnya menyebar ke semua orang, entah kapan, tanpa jaminan urutan apa pun sepanjang jalan.
 
-Analogi ini bocor pada soal kesengajaan. Gosip menyebar secara organik tanpa kendali sengaja. Sistem terdistribusi **memilih** model consistency-nya secara sadar (atau seharusnya begitu) — dan pilihan itu adalah keputusan rekayasa, bukan sesuatu yang terjadi begitu saja seperti gosip kantor.
+Analogi ini bocor di dua titik. Pertama, soal linearizable: jaminannya bukan "semua orang tahu pada detik yang sama", melainkan bahwa setiap operasi tampak terjadi seketika di satu titik antara saat ia dimulai dan saat ia selesai, dan urutan itu tidak pernah bertentangan dengan urutan waktu nyata. Kedua, soal kesengajaan. Gosip menyebar secara organik tanpa kendali sengaja. Sistem terdistribusi **memilih** model consistency-nya secara sadar (atau seharusnya begitu) — dan pilihan itu adalah keputusan rekayasa, bukan sesuatu yang terjadi begitu saja seperti gosip kantor.
 
 ## How It Works
 
@@ -53,34 +53,53 @@ Session guarantees adalah bentuk consistency yang lebih halus, sering dipakai pr
 ```go
 package causal
 
-// VectorClock menyederhanakan gagasan inti causal consistency —
-// setiap node melacak "versi" operasi yang sudah diketahui dari
-// SETIAP node lain, bukan hanya timestamp tunggal.
+// VectorClock menyederhanakan gagasan inti causal consistency: setiap node
+// melacak berapa banyak operasi dari SETIAP node yang sudah ia ketahui.
+// Node yang tidak tercatat dianggap bernilai 0.
 type VectorClock map[string]int
 
-// HappensBefore menentukan apakah clock A terjadi SEBELUM clock B
-// dalam hubungan sebab-akibat — bukan berdasarkan waktu jam dinding,
-// tapi berdasarkan apakah setiap komponen A <= komponen B, dan
-// minimal satu komponen A < B.
+// HappensBefore mengembalikan true kalau a terjadi SEBELUM b dalam
+// hubungan sebab-akibat: setiap komponen a <= komponen b, dan minimal satu
+// komponen a < b. Kedua map harus diperiksa, karena node yang hanya ada di
+// salah satunya bernilai 0 di map yang lain.
 func HappensBefore(a, b VectorClock) bool {
-	atLeastOneLess := false
+	lebihKecil := false
 	for node, aVal := range a {
-		bVal := b[node]
+		bVal := b[node] // 0 kalau node tidak tercatat di b
 		if aVal > bVal {
-			return false // A tahu sesuatu yang B belum tahu — TIDAK bisa "sebelum" B
+			return false // a mengetahui sesuatu yang belum diketahui b
 		}
 		if aVal < bVal {
-			atLeastOneLess = true
+			lebihKecil = true
 		}
 	}
-	return atLeastOneLess
+	for node, bVal := range b {
+		if _, ada := a[node]; !ada && bVal > 0 {
+			lebihKecil = true // di a, komponen ini bernilai 0
+		}
+	}
+	return lebihKecil
 }
 
-// Concurrent berarti KEDUA operasi tidak punya hubungan sebab-akibat
-// satu sama lain — keduanya BOLEH terlihat dalam urutan berbeda di
-// node berbeda tanpa melanggar causal consistency.
+// Concurrent berarti kedua operasi tidak punya hubungan sebab-akibat; keduanya
+// boleh terlihat dalam urutan berbeda di node berbeda tanpa melanggar causal
+// consistency. Clock yang identik bukan concurrent: itu operasi yang sama.
 func Concurrent(a, b VectorClock) bool {
-	return !HappensBefore(a, b) && !HappensBefore(b, a)
+	return !HappensBefore(a, b) && !HappensBefore(b, a) && !sama(a, b)
+}
+
+func sama(a, b VectorClock) bool {
+	for node, v := range a {
+		if b[node] != v {
+			return false
+		}
+	}
+	for node, v := range b {
+		if a[node] != v {
+			return false
+		}
+	}
+	return true
 }
 ```
 
@@ -131,8 +150,9 @@ Linearizability memberi jaminan paling kuat dan paling mudah dipahami, tapi butu
 
 ## Further Reading
 
-- Werner Vogels, "Eventual Consistency" (2008) — tulisan yang mempopulerkan spektrum model consistency di luar komunitas akademik murni.
-- Materi akademik distributed systems mengenai formalisasi model consistency (linearizability pertama kali diformalkan oleh Herlihy dan Wing, 1990) — relevan untuk ambisi studi master distributed systems.
+- Werner Vogels, "Eventually Consistent" (ACM Queue, 2008) — tulisan yang mempopulerkan spektrum model consistency di luar komunitas akademik.
+- Maurice Herlihy dan Jeannette Wing, "Linearizability: A Correctness Condition for Concurrent Objects" (ACM TOPLAS, 1990) — definisi formal linearizability; relevan untuk ambisi studi master distributed systems.
+- Martin Kleppmann, *Designing Data-Intensive Applications*, bab "Consistency and Consensus" — penjelasan paling mudah diikuti tentang linearizability, ordering, dan hubungannya dengan consensus.
 
 ## Catatan Saya
 

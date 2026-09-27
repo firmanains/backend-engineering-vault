@@ -31,7 +31,7 @@ Analogi ini bocor pada satu hal: kotak pengumpulan fisik tidak peduli urutan has
 ## How It Works
 
 ```go
-package main
+package dashboard
 
 import (
 	"context"
@@ -45,7 +45,7 @@ type HasilSumber struct {
 	Err    error
 }
 
-// FanOut meluncurkan satu goroutine PER SUMBER — paralel, bukan
+// AmbilDataDariSemuaSumber meluncurkan satu goroutine PER SUMBER — paralel, bukan
 // sekuensial. Setiap goroutine mengirim hasilnya ke channel yang SAMA
 // (fan-in terjadi di sini, karena semua goroutine menulis ke satu channel).
 func AmbilDataDariSemuaSumber(ctx context.Context, sumber []string) []HasilSumber {
@@ -101,23 +101,31 @@ flowchart LR
 Pola fan-in generik untuk **menggabungkan beberapa channel terpisah** (bukan beberapa goroutine yang menulis ke satu channel yang sama seperti contoh di atas) butuh satu goroutine tambahan **per channel sumber** yang membaca dari channel itu dan meneruskannya ke channel gabungan — pola ini penting ketika channel-channel yang perlu digabung berasal dari fungsi terpisah yang masing-masing sudah mengembalikan channel-nya sendiri (misalnya beberapa tahap [[Pipelines|pipeline]] yang paralel).
 
 ```go
-package main
+package dashboard
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
-// Merge menggabungkan BEBERAPA channel input jadi SATU channel output —
-// pola fan-in murni untuk channel yang sudah ada secara terpisah,
-// bukan goroutine yang menulis ke satu channel bersama sejak awal.
-func Merge(channels ...<-chan int) <-chan int {
+// Merge menggabungkan beberapa channel input jadi satu channel output,
+// pola fan-in murni untuk channel yang sudah ada secara terpisah.
+// ctx wajib: kalau konsumen berhenti membaca lebih awal, goroutine
+// penerus tidak boleh terjebak selamanya di "keluaran <- v".
+func Merge(ctx context.Context, channels ...<-chan int) <-chan int {
 	keluaran := make(chan int)
 	var wg sync.WaitGroup
 
-	// SATU goroutine per channel sumber, masing-masing meneruskan
+	// Satu goroutine per channel sumber, masing-masing meneruskan
 	// isinya ke channel gabungan yang sama.
 	teruskan := func(c <-chan int) {
 		defer wg.Done()
 		for v := range c {
-			keluaran <- v
+			select {
+			case keluaran <- v:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 
@@ -128,7 +136,7 @@ func Merge(channels ...<-chan int) <-chan int {
 
 	go func() {
 		wg.Wait()
-		close(keluaran) // ditutup HANYA setelah SEMUA channel sumber habis
+		close(keluaran) // ditutup hanya setelah semua goroutine penerus selesai
 	}()
 
 	return keluaran

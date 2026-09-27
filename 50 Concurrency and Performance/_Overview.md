@@ -20,7 +20,7 @@ Seluruh isi domain ini adalah level **intermediate** — tidak ada versi juniorn
 
 ## Kenapa Ini Penting
 
-Ini adalah domain yang paling langsung melayani tujuan "mastery sungguhan dalam Go". Menulis `go func() {...}()` mudah; tahu kapan goroutine itu bocor, kenapa GC pause muncul di p99 latency, atau kenapa cache yang terlihat benar ternyata rentan stampede saat satu key populer kedaluwarsa — itu yang membedakan engineer yang "bisa Go" dari yang benar-benar menguasainya.
+Ini adalah domain yang paling langsung melayani tujuan "mastery sungguhan dalam Go". Menulis `go func() {...}()` mudah; tahu kapan goroutine itu bocor, kenapa GC ikut menaikkan p99 latency, atau kenapa cache yang terlihat benar ternyata rentan stampede saat satu key populer kedaluwarsa — itu yang membedakan engineer yang "bisa Go" dari yang benar-benar menguasainya.
 
 ## Reading Order
 

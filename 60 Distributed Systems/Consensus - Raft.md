@@ -14,7 +14,7 @@ created: 2026-08-02
 
 ## TL;DR
 
-Consensus adalah masalah membuat sekumpulan node yang tidak saling percaya sepenuhnya (bisa gagal, bisa lambat) **sepakat** pada satu nilai atau urutan kejadian, meski jaringan di antara mereka tidak selalu andal. Raft menyelesaikan ini dengan cara yang secara sengaja dirancang **mudah dipahami** (kontras eksplisit dengan Paxos yang terkenal sulit, lihat [[Consensus - Paxos in Overview]]): satu node dipilih sebagai **leader** lewat mekanisme election berbasis timeout dan quorum, leader itu satu-satunya yang menerima tulisan baru dan menyusunnya jadi log berurutan, lalu mereplikasi log itu ke node lain (**follower**) — begitu mayoritas follower mengonfirmasi menerima satu entri log, entri itu dianggap **committed** dan tidak akan pernah hilang lagi, apa pun yang terjadi setelahnya.
+Consensus adalah masalah membuat sekumpulan node yang bisa crash atau lambat (tapi tidak berbohong; Raft tidak menangani node jahat atau *Byzantine*) **sepakat** pada satu nilai atau urutan kejadian, meski jaringan di antara mereka tidak selalu andal. Raft menyelesaikan ini dengan cara yang secara sengaja dirancang **mudah dipahami** (kontras eksplisit dengan Paxos yang terkenal sulit, lihat [[Consensus - Paxos in Overview]]): satu node dipilih sebagai **leader** lewat mekanisme election berbasis timeout dan quorum, leader itu satu-satunya yang menerima tulisan baru dan menyusunnya jadi log berurutan, lalu mereplikasi log itu ke node lain (**follower**) — begitu mayoritas follower mengonfirmasi menerima satu entri log, entri itu dianggap **committed** dan tidak akan pernah hilang lagi, apa pun yang terjadi setelahnya.
 
 ## The Problem
 
@@ -35,16 +35,21 @@ stateDiagram-v2
     [*] --> Follower
     Follower --> Candidate: Timeout tanpa heartbeat dari leader
     Candidate --> Leader: Menang mayoritas suara
-    Candidate --> Follower: Ada leader lain / kalah suara
+    Candidate --> Candidate: Timeout tanpa pemenang (suara terbelah), election ulang
+    Candidate --> Follower: Menemukan leader sah / term lebih baru
     Leader --> Follower: Menemukan term lebih baru
 ```
-Setiap node punya salah satu dari tiga peran ini. **Follower** pasif, hanya menerima entri log dari leader dan heartbeat berkala. Kalau follower tidak menerima heartbeat dalam jangka waktu tertentu (mencurigai leader mati, mirip [[Failure Detectors]]), ia berubah jadi **candidate** dan meminta suara dari node lain untuk jadi leader baru. Kalau ia mendapat suara dari mayoritas (quorum, lihat [[Quorums]]), ia jadi **leader** — satu-satunya node yang boleh menerima tulisan baru dan mengatur urutan log untuk seluruh cluster.
+Setiap node punya salah satu dari tiga peran ini. **Follower** pasif, hanya menerima entri log dari leader dan heartbeat berkala. Kalau follower tidak menerima heartbeat dalam jangka waktu tertentu (mencurigai leader mati, mirip [[Failure Detectors]]), ia berubah jadi **candidate** dan meminta suara dari node lain untuk jadi leader baru. Timeout election di setiap node diacak (misalnya dalam rentang 150–300 ms di paper aslinya) supaya jarang ada dua candidate yang mulai bersamaan dan membelah suara. Kalau ia mendapat suara dari mayoritas (quorum, lihat [[Quorums]]), ia jadi **leader** — satu-satunya node yang boleh menerima tulisan baru dan mengatur urutan log untuk seluruh cluster.
 
-Proses replikasi log: klien mengirim perintah ke leader, leader menambahkannya ke log lokalnya, lalu mengirim entri itu ke semua follower. Begitu **mayoritas** follower mengonfirmasi menerima entri itu, leader menganggapnya **committed** dan menerapkannya (misalnya menulis ke state aplikasi), lalu memberi tahu follower bahwa entri itu sudah commit di replikasi berikutnya. Follower yang tertinggal (sempat terputus) akan mengejar ketertinggalan begitu terhubung kembali, karena leader terus mengirim entri yang belum mereka miliki sampai log mereka sinkron.
+Proses replikasi log: klien mengirim perintah ke leader, leader menambahkannya ke log lokalnya, lalu mengirim entri itu ke semua follower. Begitu **mayoritas** follower mengonfirmasi menerima entri itu, leader menganggapnya **committed** dan menerapkannya (misalnya menulis ke state aplikasi), lalu memberi tahu follower bahwa entri itu sudah commit di replikasi berikutnya. Follower yang tertinggal (sempat terputus) akan mengejar ketertinggalan begitu terhubung kembali. Setiap pesan `AppendEntries` membawa indeks dan term dari entri tepat **sebelum** entri baru (`prevLogIndex`, `prevLogTerm`). Follower menolak pesan itu kalau log-nya tidak punya entri yang cocok di posisi tersebut; leader lalu mundur satu posisi dan mencoba lagi sampai menemukan titik di mana kedua log sama. Semua entri follower sesudah titik itu yang bertentangan dengan log leader dihapus dan diganti. Pemeriksaan kecil ini (*log matching*) yang menjamin: kalau dua log punya entri dengan indeks dan term yang sama, seluruh isi sebelum entri itu juga identik.
 
 ## Under The Hood
 
 **Term** adalah konsep krusial yang mencegah kebingungan antar leader lama dan baru — setiap kali ada election baru, term (nomor urut "generasi kepemimpinan") bertambah, dan setiap pesan yang dikirim menyertakan term pengirimnya. Node yang menerima pesan dengan term **lebih lama** dari yang ia ketahui langsung menolaknya — mekanisme ini yang mencegah leader lama (yang mungkin sempat terputus dan tidak sadar sudah digantikan) terus mengklaim otoritas setelah cluster sudah memilih leader baru, mencegah split brain (lihat [[Leader Election and Split Brain]]).
+
+**Aturan election yang membuat entri committed tidak pernah hilang.** "Mayoritas punya salinannya" saja belum cukup: tanpa aturan tambahan, node yang log-nya tertinggal bisa terpilih jadi leader lalu menimpa entri yang sudah committed. Raft mencegahnya dengan *election restriction*: node hanya memberikan suaranya kepada candidate yang log-nya **setidaknya sama mutakhirnya** dengan log node itu sendiri (dibandingkan dari term entri terakhir, lalu panjang log). Karena entri committed ada di mayoritas node, dan candidate juga butuh suara mayoritas, setidaknya satu pemilih pasti memegang entri itu dan akan menolak candidate yang tidak memilikinya. Ada satu kehalusan lagi: leader hanya menghitung replika untuk menentukan commit atas entri dari **term-nya sendiri**; entri dari term sebelumnya ikut ter-commit secara tidak langsung saat entri term baru di atasnya ter-commit. Paper Raft menunjukkan kenapa aturan ini perlu lewat skenario di Figure 8-nya.
+
+**Membaca dari leader belum otomatis linearizable.** Leader yang sudah digantikan tapi belum tahu (misalnya sedang terisolasi oleh partition) masih bisa menjawab pembacaan dengan data usang. Implementasi nyata menambah langkah untuk pembacaan: leader memastikan dirinya masih leader dengan bertukar heartbeat dengan mayoritas sebelum menjawab (*ReadIndex*), atau memakai *lease* berbasis waktu yang bergantung pada asumsi batas clock drift.
 
 Poin yang sering disalahpahami: Raft **tidak** menjamin setiap tulisan langsung diproses secepat mungkin — ada biaya nyata (leader harus menunggu konfirmasi mayoritas sebelum commit) demi jaminan bahwa entri yang sudah committed **tidak pernah** hilang, bahkan kalau leader yang menulisnya langsung mati sesaat setelahnya (karena mayoritas node lain sudah punya salinannya). Log yang belum committed (baru diterima sebagian kecil follower) **bisa** hilang atau ditimpa kalau leader berganti sebelum sempat commit — properti yang disengaja, bukan bug, karena entri yang belum diketahui mayoritas memang belum bisa dijamin bertahan.
 
@@ -53,10 +58,10 @@ Poin yang sering disalahpahami: Raft **tidak** menjamin setiap tulisan langsung 
 ```go
 package raft
 
-import "fmt"
+// Kode ini menunjukkan tiga aturan inti Raft sebagai fungsi murni.
+// Ini bukan implementasi lengkap: tidak ada jaringan, timer, persistensi,
+// maupun penerapan entri ke state machine.
 
-// Role menunjukkan gagasan inti: SETIAP saat, sebuah node punya
-// TEPAT SATU peran, dan hanya Leader yang boleh menerima tulisan baru.
 type Role int
 
 const (
@@ -73,37 +78,69 @@ type LogEntry struct {
 type Node struct {
 	Role        Role
 	CurrentTerm int
+	VotedFor    string // kosong kalau belum memberi suara di term ini
 	Log         []LogEntry
 }
 
-// HandleAppendEntries menunjukkan aturan inti: pesan dengan term
-// LEBIH LAMA ditolak — mekanisme yang mencegah leader lama yang
-// tidak sadar sudah digantikan terus mengklaim otoritas.
-func (n *Node) HandleAppendEntries(leaderTerm int, entries []LogEntry) (success bool, currentTerm int) {
-	if leaderTerm < n.CurrentTerm {
-		return false, n.CurrentTerm // TOLAK: pengirim punya term usang
+// lastLog mengembalikan indeks (berbasis 1, 0 = log kosong) dan term entri
+// terakhir.
+func (n *Node) lastLog() (index, term int) {
+	if len(n.Log) == 0 {
+		return 0, 0
 	}
+	return len(n.Log), n.Log[len(n.Log)-1].Term
+}
 
-	if leaderTerm > n.CurrentTerm {
-		n.CurrentTerm = leaderTerm
-		n.Role = Follower // otoritas baru diakui, turun jadi follower
+// HandleRequestVote: aturan 1, term usang ditolak; aturan 2, suara hanya
+// diberikan kepada candidate yang log-nya setidaknya sama mutakhir.
+func (n *Node) HandleRequestVote(term int, candidateID string, lastIndex, lastTerm int) (granted bool, currentTerm int) {
+	if term < n.CurrentTerm {
+		return false, n.CurrentTerm
 	}
-
-	n.Log = append(n.Log, entries...)
+	if term > n.CurrentTerm {
+		n.CurrentTerm, n.Role, n.VotedFor = term, Follower, ""
+	}
+	if n.VotedFor != "" && n.VotedFor != candidateID {
+		return false, n.CurrentTerm // sudah memilih orang lain di term ini
+	}
+	myIndex, myTerm := n.lastLog()
+	upToDate := lastTerm > myTerm || (lastTerm == myTerm && lastIndex >= myIndex)
+	if !upToDate {
+		return false, n.CurrentTerm // election restriction
+	}
+	n.VotedFor = candidateID
 	return true, n.CurrentTerm
 }
 
-// IsCommitted menunjukkan syarat inti: entri dianggap AMAN hanya
-// setelah MAYORITAS node mengonfirmasi memilikinya — bukan cukup
-// satu atau beberapa node saja.
-func IsCommitted(confirmedCount, totalNodes int) bool {
-	return confirmedCount > totalNodes/2
+// HandleAppendEntries: aturan 3, log matching. prevIndex/prevTerm menunjuk
+// entri tepat sebelum entries (berbasis 1; 0 berarti awal log).
+func (n *Node) HandleAppendEntries(term, prevIndex, prevTerm int, entries []LogEntry) (success bool, currentTerm int) {
+	if term < n.CurrentTerm {
+		return false, n.CurrentTerm // pengirim adalah leader dengan term usang
+	}
+	n.CurrentTerm, n.Role = term, Follower
+
+	if prevIndex > len(n.Log) || (prevIndex > 0 && n.Log[prevIndex-1].Term != prevTerm) {
+		return false, n.CurrentTerm // log tidak cocok; leader akan mundur dan mencoba lagi
+	}
+
+	for i, e := range entries {
+		pos := prevIndex + i // posisi berbasis 0 untuk entri ini
+		if pos < len(n.Log) {
+			if n.Log[pos].Term == e.Term {
+				continue // entri sudah ada dan sama
+			}
+			n.Log = n.Log[:pos] // konflik: buang entri ini dan semua sesudahnya
+		}
+		n.Log = append(n.Log, e)
+	}
+	return true, n.CurrentTerm
 }
 
-func (n *Node) StartElection(totalNodes int) {
-	n.CurrentTerm++
-	n.Role = Candidate
-	fmt.Printf("node memulai election untuk term %d\n", n.CurrentTerm)
+// Majority: jumlah node (termasuk leader) yang harus memiliki sebuah entri
+// sebelum leader boleh menganggapnya committed.
+func Majority(totalNodes int) int {
+	return totalNodes/2 + 1
 }
 ```
 
@@ -121,7 +158,7 @@ Raft (dan consensus formal secara umum) menambah latency nyata untuk setiap tuli
 > Menganggap entri log yang baru diterima leader (belum dikonfirmasi mayoritas follower) sudah aman dan tidak akan hilang — hanya entri yang sudah **committed** (dikonfirmasi mayoritas) yang dijamin bertahan; entri yang belum committed bisa hilang kalau leader mati sebelum sempat mereplikasinya.
 
 > [!warning] Jebakan
-> Menjalankan cluster Raft dengan jumlah node genap — tidak menambah keamanan dibanding jumlah ganjil terdekat (4 node butuh mayoritas 3, sama seperti 5 node), hanya menambah biaya infrastruktur tanpa manfaat tambahan, dan meningkatkan kemungkinan hasil seri saat partition membelah cluster jadi dua bagian yang sama besar.
+> Menjalankan cluster Raft dengan jumlah node genap. Cluster 4 node butuh mayoritas 3, sehingga hanya mentoleransi 1 node mati, sama seperti cluster 3 node; untuk mentoleransi 2 node mati dibutuhkan 5 node. Node keempat hanya menambah biaya dan satu lagi titik yang bisa gagal, dan partition yang membelah cluster jadi 2–2 membuat kedua sisi tidak punya mayoritas sama sekali.
 
 > [!warning] Jebakan
 > Mengabaikan konsep term dan menganggap leader lama otomatis "tahu" dirinya sudah digantikan — leader lama yang sempat terputus terus percaya dirinya leader sampai ia menerima pesan dengan term lebih baru; term-lah yang jadi mekanisme eksplisit membuatnya sadar dan mundur.
@@ -130,7 +167,7 @@ Raft (dan consensus formal secara umum) menambah latency nyata untuk setiap tuli
 
 1. Jelaskan tiga peran node dalam Raft, dan kapan transisi antar peran terjadi.
 2. Apa itu term, dan bagaimana ia mencegah leader lama terus mengklaim otoritas setelah cluster memilih leader baru?
-3. Kenapa entri log dianggap "aman" hanya setelah dikonfirmasi mayoritas, bukan setelah diterima satu node (bahkan leader) saja?
+3. Kenapa "sudah ada di mayoritas node" belum cukup untuk menjamin entri committed tidak hilang, dan aturan election apa yang melengkapinya?
 4. Desain terbuka: kamu diminta merancang sistem penyimpanan konfigurasi terpusat untuk 13 aplikasi yang harus tetap konsisten meski beberapa node mengalami gangguan jaringan sesaat, dan tim mempertimbangkan apakah perlu membangun sistem berbasis Raft sendiri atau memakai tool yang sudah mengimplementasikannya (seperti Consul/etcd). Jelaskan pertimbangan yang menentukan pilihan ini.
 
 > [!success]- Kunci jawaban
@@ -141,7 +178,7 @@ Raft (dan consensus formal secara umum) menambah latency nyata untuk setiap tuli
 
 - Sebutkan tiga peran node dalam Raft.
 - Apa itu term, dan apa fungsinya?
-- Kenapa entri log dianggap aman hanya setelah dikonfirmasi mayoritas?
+- Apa itu election restriction, dan kenapa tanpanya entri committed bisa tertimpa?
 - Kenapa cluster Raft sebaiknya punya jumlah node ganjil?
 
 ## Connected Notes

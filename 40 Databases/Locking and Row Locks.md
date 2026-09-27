@@ -56,11 +56,25 @@ Diagram ini menunjukkan bahwa `FOR UPDATE` memaksa `Worker 2` **menunggu** sampa
 - **`SKIP LOCKED`** — alih-alih menunggu baris yang sudah terkunci, transaction langsung **melewati** baris itu dan mengambil baris berikutnya yang belum terkunci — pola inilah yang membuat "antrean job di database" (worker mengambil job berikutnya yang tersedia, bukan menunggu antrean) bisa diimplementasikan tanpa duplikasi kerja dan tanpa saling menunggu antar worker.
 - **`NOWAIT`** — alih-alih menunggu, transaction langsung gagal dengan error kalau baris yang diminta sudah terkunci transaction lain, memberi aplikasi kesempatan menangani situasi itu secara eksplisit (misalnya, retry dengan strategi berbeda) daripada diam menunggu.
 
+Periksa versi database sebelum memakai dua opsi terakhir. `SKIP LOCKED` tersedia di MySQL 8.0 dan MariaDB 10.6 ke atas (hanya untuk InnoDB); di MariaDB yang lebih lama, klausa itu ditolak sebagai syntax error. PostgreSQL sudah mendukung keduanya sejak lama.
+
+**Pessimistic vs optimistic locking.** Semua varian di atas adalah [[../99 Glossary/Term - Pessimistic Locking|pessimistic locking]]: kunci diambil *sebelum* menulis, dengan asumsi konflik akan terjadi. Pendekatan sebaliknya adalah [[../99 Glossary/Term - Optimistic Locking|optimistic locking]]: tidak ada lock yang ditahan saat membaca, dan konflik baru dideteksi saat menulis. Caranya dengan kolom versi:
+
+```sql
+-- Baca: SELECT id, status, versi FROM permohonan WHERE id = 7;  -- misalnya versi = 3
+UPDATE permohonan
+SET status = 'diverifikasi', versi = versi + 1
+WHERE id = 7 AND versi = 3;
+-- 0 baris terpengaruh = ada pihak lain yang mengubah baris ini lebih dulu.
+```
+
+Pilih pessimistic ketika konflik sering terjadi dan jendela antara baca dan tulis pendek, dalam satu transaction (misalnya worker yang merebut job). Pilih optimistic ketika konflik jarang, atau ketika baca dan tulis terpisah jauh, misalnya form yang dibuka petugas lalu disimpan beberapa menit kemudian di request HTTP lain. Menahan row lock selama petugas mengisi form tidak mungkin dilakukan, karena transaction tidak bisa membentang melintasi dua request. Yii2 menyediakan optimistic locking bawaan lewat `optimisticLock()` di Active Record.
+
 ## Under The Hood
 
 InnoDB (MySQL/MariaDB) mengimplementasikan row lock lewat mekanisme yang terikat pada **index** — locking sebenarnya terjadi pada entri index yang dilalui untuk menemukan baris, bukan langsung pada baris data itu sendiri. Konsekuensi praktis yang mengejutkan banyak orang: `UPDATE tabel SET x = 1 WHERE kolom_tanpa_index = 'y'` di InnoDB bisa mengunci **jauh lebih banyak baris** dari yang diharapkan (bahkan mendekati keseluruhan tabel dalam kasus tertentu), karena tanpa index yang tepat pada `kolom_tanpa_index`, InnoDB harus memindai dan mengunci setiap baris yang diperiksa selama pencarian, bukan hanya baris yang akhirnya cocok — locking granularity di InnoDB pada praktiknya sangat bergantung pada keberadaan index yang tepat, bukan murni "per baris" seperti namanya menyiratkan.
 
-InnoDB juga mengimplementasikan **next-key locking** — kombinasi row lock pada baris yang ditemukan **dan** gap lock pada celah sebelum baris itu, mekanisme yang (seperti disinggung di [[Isolation Levels and Their Anomalies]]) menjadi alasan `REPEATABLE READ` InnoDB secara praktis mencegah sebagian besar phantom read, berbeda dari standar SQL murni. PostgreSQL tidak memakai gap lock — ia mengandalkan mekanisme SSI (disinggung di note yang sama) untuk mendeteksi konflik yang setara pada level `SERIALIZABLE`.
+InnoDB juga mengimplementasikan **next-key locking**: kombinasi row lock pada baris yang ditemukan **dan** gap lock pada celah sebelum baris itu. Mekanisme ini mencegah transaction lain menyisipkan baris ke rentang yang sudah dibaca oleh *locking read*, sehingga phantom tidak muncul untuk `SELECT ... FOR UPDATE`, `UPDATE`, dan `DELETE` (bacaan biasa sudah terlindungi oleh snapshot, lihat [[Isolation Levels and Their Anomalies]]). Gap lock ini hanya aktif di `REPEATABLE READ` dan `SERIALIZABLE`. Di `READ COMMITTED`, InnoDB mematikan gap lock untuk pencarian biasa, dan itulah salah satu alasan sebagian tim menurunkan isolation level demi mengurangi deadlock. PostgreSQL tidak memakai gap lock — ia mengandalkan mekanisme SSI (disinggung di note yang sama) untuk mendeteksi konflik yang setara pada level `SERIALIZABLE`.
 
 ## In Go
 
@@ -76,11 +90,12 @@ import (
 
 var ErrTidakAdaJobTersedia = errors.New("tidak ada job tersedia untuk diproses")
 
-// AmbilJobBerikutnya memakai FOR UPDATE SKIP LOCKED — pola "queue di dalam
+// AmbilJobBerikutnya memakai FOR UPDATE SKIP LOCKED, pola "queue di dalam
 // database" yang aman untuk banyak worker konkuren. Worker yang barisnya
-// sedang dikunci worker lain TIDAK menunggu; ia langsung melompat ke baris
-// berikutnya yang belum dikunci siapa pun, menghindari duplikasi kerja
-// tanpa satu worker pun perlu menunggu worker lain selesai.
+// sedang dikunci worker lain tidak menunggu; ia langsung melompat ke baris
+// berikutnya yang belum dikunci. Butuh MySQL 8.0+ atau MariaDB 10.6+, dan
+// index (status, tanggal_dibuat): tanpa index itu, InnoDB mengunci setiap
+// baris yang dipindai, bukan hanya baris yang akhirnya dipilih.
 func AmbilJobBerikutnya(ctx context.Context, db *sql.DB) (int64, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -114,13 +129,15 @@ func AmbilJobBerikutnya(ctx context.Context, db *sql.DB) (int64, error) {
 }
 ```
 
+Perhatikan batas pola ini. Status diubah jadi `diproses` lalu transaction langsung di-commit, dan pekerjaan sesungguhnya berjalan **di luar** transaction. Kalau worker mati di tengah jalan, baris itu tertahan di status `diproses` selamanya. Sistem nyata butuh kolom seperti `diproses_sejak` dan satu proses penyapu yang mengembalikan job yang tertahan terlalu lama ke `menunggu`. Konsekuensinya, sebuah job bisa diproses lebih dari sekali (worker lambat dikira mati), jadi pemrosesannya tetap harus [[../30 APIs and Web/Idempotency|idempotent]].
+
 ## In His Stack
 
 `SELECT ... FOR UPDATE SKIP LOCKED` adalah pola yang sangat relevan sebagai alternatif ringan dari message queue sungguhan (Kafka, RabbitMQ) untuk kasus antrean sederhana yang volumenya tidak terlalu ekstrem — banyak sistem PHP/Yii2 lama memakai polling sederhana tanpa locking eksplisit sama sekali (`SELECT ... WHERE status = 'menunggu' LIMIT 1` tanpa `FOR UPDATE`), yang persis rentan terhadap race condition seperti di "The Problem" begitu lebih dari satu worker/cron job berjalan bersamaan — kondisi yang mudah terjadi tanpa disadari begitu sebuah cron job di-scale jadi berjalan di lebih dari satu server, atau lebih dari satu instance Kubernetes.
 
 ## Trade-offs and When Not To Use It
 
-Row lock yang ditahan terlalu lama (transaction yang lambat menyelesaikan pekerjaannya setelah mengambil lock) memblokir transaction lain yang butuh baris yang sama, dan dalam kasus terburuk berkontribusi pada deadlock (dibahas di [[Deadlocks]]). Untuk beban kerja dengan konkurensi sangat tinggi terhadap baris yang sama (misalnya counter yang di-increment ribuan kali per detik), locking eksplisit per baris bisa menjadi bottleneck — pola atomic increment (`UPDATE counter SET nilai = nilai + 1`, yang di banyak database dieksekusi atomik tanpa perlu `SELECT ... FOR UPDATE` terpisah) atau pendekatan lain seperti sharding counter (memecah satu counter jadi beberapa baris yang dijumlahkan saat dibaca) lebih sesuai dibanding menahan row lock secara eksplisit untuk operasi sesederhana itu. Row lock adalah alat yang tepat untuk pola "baca, putuskan berdasarkan kondisi kompleks, lalu tulis" — bukan untuk operasi tulis sederhana yang bisa dilakukan atomik dalam satu statement.
+Row lock yang ditahan terlalu lama (transaction yang lambat menyelesaikan pekerjaannya setelah mengambil lock) memblokir transaction lain yang butuh baris yang sama, dan dalam kasus terburuk berkontribusi pada deadlock (dibahas di [[Deadlocks]]). Untuk beban kerja dengan konkurensi sangat tinggi terhadap baris yang sama (misalnya counter yang di-increment ribuan kali per detik), locking eksplisit per baris bisa menjadi bottleneck — pola atomic increment (`UPDATE counter SET nilai = nilai + 1`, yang atomik tanpa perlu `SELECT ... FOR UPDATE` terpisah; ia tetap mengambil row lock, tapi hanya selama statement dan transaction-nya berjalan, sehingga jauh lebih singkat) atau pendekatan lain seperti sharding counter (memecah satu counter jadi beberapa baris yang dijumlahkan saat dibaca) lebih sesuai dibanding menahan row lock secara eksplisit untuk operasi sesederhana itu. Row lock adalah alat yang tepat untuk pola "baca, putuskan berdasarkan kondisi kompleks, lalu tulis" — bukan untuk operasi tulis sederhana yang bisa dilakukan atomik dalam satu statement.
 
 ## Common Mistakes
 
@@ -157,7 +174,8 @@ Row lock yang ditahan terlalu lama (transaction yang lambat menyelesaikan pekerj
 - [[Isolation Levels and Their Anomalies]] — write skew adalah anomali yang bisa dicegah lewat locking eksplisit sebagai alternatif menaikkan isolation level ke `SERIALIZABLE`.
 - [[Deadlocks]] — risiko langsung dari row lock yang ditahan lebih dari satu transaction secara bersilangan, dibahas di note berikutnya.
 - [[../92 Tools/PostgreSQL - Locking and SELECT FOR UPDATE|PostgreSQL - Locking and SELECT FOR UPDATE]] — detail operasional lengkap `FOR UPDATE`, `SKIP LOCKED`, `NOWAIT`, dan advisory lock di PostgreSQL secara spesifik.
-- [[../30 APIs and Web/Idempotency|Idempotency]] — pola queue-in-database dengan `SKIP LOCKED` di note ini adalah salah satu cara konkret mencegah job diproses dua kali, prinsip yang sama dengan idempotency di level API.
+- [[../30 APIs and Web/Idempotency|Idempotency]] — pelengkap `SKIP LOCKED`, bukan penggantinya: `SKIP LOCKED` mencegah dua worker merebut job yang sama pada saat bersamaan, sementara idempotency membuat pemrosesan ulang (setelah worker crash atau dikira mati) tidak berbahaya.
+- [[../99 Glossary/Term - Optimistic Locking|Term - Optimistic Locking]] — lawan dari row lock eksplisit; pilihan yang tepat saat baca dan tulis terpisah di request yang berbeda.
 
 ## Further Reading
 

@@ -51,13 +51,24 @@ Server perlu menyimpan pasangan `(idempotency key, hasil response)` untuk jangka
 ## In Go
 
 ```go
+// StatusKey menggambarkan tiga keadaan sebuah idempotency key.
+type StatusKey int
+
+const (
+    KeyBaru         StatusKey = iota // belum pernah dilihat; sudah direservasi untuk request ini
+    KeySedangDiproses                // direservasi request lain yang belum selesai
+    KeySelesai                       // sudah selesai; hasilnya tersimpan
+)
+
 type IdempotencyStore interface {
-    // Reservasi atomik: mengembalikan (hasil tersimpan, status code tersimpan,
-    // true) kalau key sudah ada, atau (nil, 0, false) dan MEREGISTRASI key ini
-    // kalau baru — SEKALIGUS dalam satu operasi atomik untuk menghindari race
-    // condition.
-    ReservasiAtauAmbil(ctx context.Context, key string) (hasil []byte, statusCode int, sudahAda bool, err error)
+    // Reservasi atomik: kalau key belum ada, ia MEREGISTRASI key ini sebagai
+    // "sedang diproses" dan mengembalikan KeyBaru — pengecekan dan registrasi
+    // terjadi dalam satu operasi atomik untuk menghindari race condition.
+    ReservasiAtauAmbil(ctx context.Context, key string) (status StatusKey, statusCode int, hasil []byte, err error)
     Simpan(ctx context.Context, key string, statusCode int, hasil []byte) error
+    // Lepas menghapus reservasi yang gagal diproses, supaya retry berikutnya
+    // boleh mencoba lagi dari awal alih-alih tertahan "sedang diproses" selamanya.
+    Lepas(ctx context.Context, key string) error
 }
 
 func handleSubmitPermohonan(store IdempotencyStore) http.HandlerFunc {
@@ -68,22 +79,35 @@ func handleSubmitPermohonan(store IdempotencyStore) http.HandlerFunc {
             return
         }
 
-        hasilTersimpan, statusTersimpan, sudahAda, err := store.ReservasiAtauAmbil(r.Context(), key)
+        status, statusTersimpan, hasilTersimpan, err := store.ReservasiAtauAmbil(r.Context(), key)
         if err != nil {
             http.Error(w, "kesalahan internal", http.StatusInternalServerError)
             return
         }
-        if sudahAda {
+        switch status {
+        case KeySelesai:
             // Percobaan ulang terdeteksi — kembalikan response yang SAMA
             // persis (status code dan body), JANGAN proses permohonan baru.
             w.Header().Set("Content-Type", "application/json")
             w.WriteHeader(statusTersimpan)
-            w.Write(hasilTersimpan)
+            if _, err := w.Write(hasilTersimpan); err != nil {
+                log.Printf("tulis response replay %s: %v", key, err)
+            }
+            return
+        case KeySedangDiproses:
+            // Request pertama belum selesai. Jangan proses paralel, jangan
+            // menunggu tanpa batas: minta client mencoba lagi sebentar lagi.
+            w.Header().Set("Retry-After", "2")
+            http.Error(w, "permohonan dengan key ini sedang diproses", http.StatusConflict)
             return
         }
 
         permohonan, err := prosesPermohonanBaru(r.Context(), r.Body)
         if err != nil {
+            // Lepas reservasi supaya retry berikutnya bisa mencoba lagi.
+            if lepasErr := store.Lepas(r.Context(), key); lepasErr != nil {
+                log.Printf("lepas reservasi %s: %v", key, lepasErr)
+            }
             http.Error(w, "gagal memproses permohonan", http.StatusInternalServerError)
             return
         }
@@ -94,22 +118,28 @@ func handleSubmitPermohonan(store IdempotencyStore) http.HandlerFunc {
             return
         }
 
-        // Kalau penyimpanan key gagal, request ini TIDAK boleh dilaporkan sukses:
-        // retry berikutnya akan diproses sebagai request baru dan menghasilkan
-        // duplikasi — persis yang seharusnya dicegah mekanisme ini.
+        // Kalau penyimpanan hasil gagal, request ini TIDAK boleh dilaporkan
+        // sukses. Reservasi sengaja TIDAK dilepas: permohonan sudah dibuat,
+        // jadi retry harus tertahan (lalu ditangani manual/rekonsiliasi),
+        // bukan diproses ulang menjadi duplikat.
         if err := store.Simpan(r.Context(), key, http.StatusCreated, hasil); err != nil {
+            log.Printf("simpan hasil idempotency %s: %v", key, err)
             http.Error(w, "kesalahan internal", http.StatusInternalServerError)
             return
         }
 
         w.Header().Set("Content-Type", "application/json")
         w.WriteHeader(http.StatusCreated)
-        w.Write(hasil)
+        if _, err := w.Write(hasil); err != nil {
+            log.Printf("tulis response %s: %v", key, err)
+        }
     }
 }
 ```
 
-Perhatikan `ReservasiAtauAmbil` dirancang sebagai **satu operasi atomik**, bukan "periksa dulu, baru proses, baru simpan" secara terpisah — kalau dipisah, dua request dengan key yang sama yang datang **hampir bersamaan** (bukan sekadar retry berurutan) bisa sama-sama lolos pemeriksaan "belum ada" sebelum salah satunya sempat menyimpan, menghasilkan duplikasi tepat yang seharusnya dicegah mekanisme ini.
+Perhatikan `ReservasiAtauAmbil` dirancang sebagai **satu operasi atomik**, bukan "periksa dulu, baru proses, baru simpan" secara terpisah — kalau dipisah, dua request dengan key yang sama yang datang **hampir bersamaan** (bukan sekadar retry berurutan) bisa sama-sama lolos pemeriksaan "belum ada" sebelum salah satunya sempat menyimpan, menghasilkan duplikasi tepat yang seharusnya dicegah mekanisme ini. Di database relasional, operasi atomik ini biasanya berupa `INSERT` ke tabel dengan unique constraint pada kolom key: yang berhasil insert adalah pemilik reservasi, yang gagal karena duplicate key tahu key itu sudah ada.
+
+Karena ada reservasi, sebuah key punya **tiga** keadaan, bukan dua. Keadaan "sedang diproses" wajib ditangani eksplisit: tanpa itu, retry yang tiba saat request pertama belum selesai akan membaca hasil yang belum ada. Reservasi yang gagal diproses juga harus dilepas, supaya key itu tidak tertahan "sedang diproses" sampai expiry.
 
 ## In His Stack
 
@@ -138,7 +168,7 @@ Membangun dukungan idempotency key menambah kompleksitas nyata: butuh storage ta
 4. Desain terbuka: sebuah partner instansi mengintegrasikan endpoint pengajuan permohonan dokumen legal-mu, dan client library mereka secara otomatis melakukan retry hingga 3 kali kalau tidak menerima response dalam 5 detik. Rancang mekanisme idempotency key lengkap untuk endpoint ini — termasuk siapa yang menghasilkan key, berapa lama disimpan, dan bagaimana menangani kasus di mana permohonan pertama masih diproses (belum selesai) saat retry kedua tiba.
 
 > [!success]- Kunci jawaban
-> Client (sistem partner) menghasilkan `Idempotency-Key` unik (UUID) sekali per maksud pengajuan, dan menyertakannya identik di setiap retry untuk permohonan logis yang sama — ini harus didokumentasikan eksplisit sebagai bagian dari kontrak API. Server menyimpan key ini selama durasi yang cukup menampung skenario retry terburuk yang wajar (misalnya 24 jam) sebelum di-evict. Untuk kasus permohonan pertama yang masih diproses (belum selesai) saat retry kedua tiba: `ReservasiAtauAmbil` harus mampu membedakan tiga keadaan — "key belum pernah dilihat" (proses baru), "key sudah selesai diproses" (kembalikan hasil tersimpan), dan "key sedang diproses request lain saat ini" (kembalikan response yang menandakan "sedang diproses, coba lagi sebentar lagi", misalnya `409 Conflict` dengan pesan jelas, alih-alih memproses ulang secara paralel atau menunggu tanpa batas).
+> Client (sistem partner) menghasilkan `Idempotency-Key` unik (UUID) sekali per maksud pengajuan, dan menyertakannya identik di setiap retry untuk permohonan logis yang sama — ini harus didokumentasikan eksplisit sebagai bagian dari kontrak API. Server menyimpan key ini selama durasi yang cukup menampung skenario retry terburuk yang wajar (misalnya 24 jam) sebelum di-evict. Untuk kasus permohonan pertama yang masih diproses (belum selesai) saat retry kedua tiba: `ReservasiAtauAmbil` harus mampu membedakan tiga keadaan — "key belum pernah dilihat" (proses baru), "key sudah selesai diproses" (kembalikan hasil tersimpan), dan "key sedang diproses request lain saat ini" (kembalikan `409 Conflict` dengan header `Retry-After` dan pesan jelas, alih-alih memproses ulang secara paralel atau menunggu tanpa batas — persis cabang `KeySedangDiproses` di kode atas). Perhatikan bahwa `409` di sini **dimaksudkan** untuk dicoba lagi setelah jeda, berbeda dari `409` konflik state biasa yang dibahas di [[Choosing Status Codes]]. Karena itu makna ini wajib tertulis di kontrak API (idealnya dengan kode error yang berbeda di body), supaya client partner tidak memperlakukan keduanya sama.
 
 ## Self-Check
 

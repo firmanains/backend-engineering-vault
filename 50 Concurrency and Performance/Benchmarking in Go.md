@@ -59,17 +59,17 @@ import "testing"
 
 var dataUji = []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
 
-// Nama fungsi HARUS diawali "Benchmark", menerima *testing.B —
-// b.N adalah jumlah iterasi yang DITENTUKAN OTOMATIS oleh testing
-// framework, disesuaikan sampai hasil pengukuran stabil secara statistik.
+// Nama fungsi harus diawali "Benchmark" dan menerima *testing.B.
+// for b.Loop() (Go 1.24+) menjalankan badan loop sebanyak yang dibutuhkan
+// framework sampai pengukurannya stabil.
 func BenchmarkGabungDenganPlus(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		GabungDenganPlus(dataUji)
 	}
 }
 
 func BenchmarkGabungDenganBuilder(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		GabungDenganBuilder(dataUji)
 	}
 }
@@ -80,19 +80,21 @@ func BenchmarkGabungDenganBuilder(b *testing.B) {
 # alokasi memori (jumlah alokasi dan total byte per operasi).
 go test -bench=. -benchmem ./...
 
-# Contoh bentuk output (angka di bawah ilustratif, bukan hasil
-# pengukuran — jalankan sendiri untuk angka yang sesungguhnya):
-# BenchmarkGabungDenganPlus-8       500000    2400 ns/op    480 B/op    9 allocs/op
-# BenchmarkGabungDenganBuilder-8   2000000     600 ns/op     64 B/op    1 allocs/op
+# Hasil satu kali run di laptop Apple Silicon 10 core, Go 1.26.
+# Waktu (ns/op) akan berbeda di mesinmu; jumlah alokasi biasanya sama.
+# BenchmarkGabungDenganPlus-10       8433922    128.9 ns/op    64 B/op    9 allocs/op
+# BenchmarkGabungDenganBuilder-10   27119409     42.80 ns/op   24 B/op    2 allocs/op
 ```
 
-Output ini memberi angka **konkret**: `GabungDenganBuilder` jauh lebih cepat, dengan alokasi yang jauh lebih sedikit (1 alokasi vs 9 alokasi) — bukan lagi perdebatan intuisi, tapi data yang bisa langsung dipakai membuat keputusan.
+Output ini memberi angka **konkret**: untuk sepuluh potongan string, `GabungDenganBuilder` sekitar tiga kali lebih cepat dengan 2 alokasi dibanding 9. Operator `+=` membuat string baru di setiap iterasi (satu alokasi per penggabungan setelah yang pertama), sementara `strings.Builder` hanya mengalokasi ulang buffer-nya saat penuh. Selisih ini tumbuh seiring jumlah potongan: `+=` menyalin ulang seluruh isi string di setiap langkah, sehingga biayanya naik kuadratik. Bahkan untuk kasus sekecil ini, keputusan sekarang berbasis data, bukan intuisi.
 
 ## Under The Hood
 
 **`b.N`** ditentukan otomatis oleh testing framework — ia menjalankan benchmark dengan `N` yang meningkat bertahap (dimulai kecil, terus digandakan) sampai total waktu eksekusi cukup lama untuk memberi pengukuran yang stabil secara statistik (mengurangi noise dari variasi kecil antar run) — developer tidak perlu (dan tidak boleh) menentukan `b.N` secara manual, karena angka ini disesuaikan otomatis berdasarkan kecepatan kode yang diukur.
 
-**`b.ResetTimer()`** penting dipanggil kalau ada setup yang mahal sebelum loop benchmark yang sebenarnya (misalnya membuat data uji besar) — tanpa ini, waktu setup ikut terhitung sebagai bagian dari pengukuran, mendistorsi hasil terutama kalau `b.N` kecil (setup mendominasi) dibanding besar (setup relatif kecil dibanding total waktu).
+**`for b.Loop()` vs `for i := 0; i < b.N; i++`.** Pola `b.N` adalah bentuk klasik yang masih akan sering kamu temui di kode lama. Sejak Go 1.24, `b.Loop()` adalah bentuk yang dianjurkan karena menutup dua jebakan sekaligus. Pertama, ia me-reset timer saat pertama kali dipanggil, sehingga setup sebelum loop otomatis tidak ikut terukur. Kedua, ia menjaga argumen dan hasil pemanggilan di dalam loop tetap "hidup", sehingga compiler tidak bisa menghapus pemanggilan yang hasilnya dibuang (*dead code elimination*). Dengan pola `b.N`, fungsi kecil yang di-inline dan hasilnya tidak dipakai bisa dioptimasi habis, dan benchmark melaporkan angka yang mustahil cepat.
+
+**`b.ResetTimer()`** penting dipanggil (pada pola `b.N`) kalau ada setup yang mahal sebelum loop benchmark yang sebenarnya (misalnya membuat data uji besar) — tanpa ini, waktu setup ikut terhitung sebagai bagian dari pengukuran, mendistorsi hasil terutama kalau `b.N` kecil (setup mendominasi) dibanding besar (setup relatif kecil dibanding total waktu).
 
 **Benchmark yang melibatkan operasi paralel** (`b.RunParallel`) mengukur throughput saat dijalankan dari banyak goroutine sekaligus — relevan untuk kode yang di production memang dipanggil konkuren (handler HTTP, misalnya), memberi gambaran performa yang lebih representatif dibanding benchmark sekuensial murni untuk kode yang karakteristik pemakaian sebenarnya selalu konkuren.
 
@@ -106,11 +108,11 @@ import (
 )
 
 func BenchmarkParseRequestBesar(b *testing.B) {
-	dataBesar := buatDataUjiBesar() // setup MAHAL, dijalankan SEKALI
+	dataBesar := buatDataUjiBesar() // setup mahal, dijalankan sekali
 
-	b.ResetTimer() // reset timer SETELAH setup, SEBELUM loop pengukuran
-
-	for i := 0; i < b.N; i++ {
+	// b.Loop() me-reset timer saat pertama dipanggil, jadi setup di atas
+	// tidak ikut terukur tanpa perlu b.ResetTimer().
+	for b.Loop() {
 		ParseRequest(dataBesar)
 	}
 }
@@ -144,7 +146,10 @@ Menulis benchmark untuk setiap fungsi kecil adalah usaha yang tidak selalu sepad
 > Membuat keputusan optimasi performa berdasarkan intuisi tanpa benchmark konkret — perbedaan yang "terasa jelas" secara teori kadang tidak signifikan dalam praktik, atau sebaliknya.
 
 > [!warning] Jebakan
-> Lupa memanggil `b.ResetTimer()` setelah setup yang mahal di dalam fungsi benchmark — waktu setup ikut terhitung sebagai bagian pengukuran, mendistorsi hasil terutama untuk `b.N` yang kecil.
+> Pada pola klasik `for i := 0; i < b.N; i++`, lupa memanggil `b.ResetTimer()` setelah setup yang mahal (waktu setup ikut terukur), atau membuang hasil fungsi yang diukur sehingga compiler bisa menghapus pemanggilannya. `for b.Loop()` (Go 1.24+) menutup kedua jebakan ini.
+
+> [!warning] Jebakan
+> Menyimpulkan "versi B lebih cepat" dari satu kali run. Selisih beberapa persen bisa sepenuhnya noise. Jalankan tiap versi berkali-kali (`-count=10`) dan bandingkan dengan `benchstat` (dari `golang.org/x/perf/cmd/benchstat`), yang melaporkan apakah selisihnya signifikan secara statistik.
 
 > [!warning] Jebakan
 > Menulis benchmark dengan data uji yang tidak representatif terhadap kondisi production nyata (terlalu kecil, terlalu seragam) — kesimpulan performa yang didapat mungkin tidak berlaku untuk beban kerja sesungguhnya.
@@ -152,7 +157,7 @@ Menulis benchmark untuk setiap fungsi kecil adalah usaha yang tidak selalu sepad
 ## Exercises
 
 1. Jelaskan kenapa `b.N` ditentukan otomatis oleh testing framework, bukan ditetapkan manual oleh developer.
-2. Kenapa `b.ResetTimer()` penting dipanggil setelah setup yang mahal di dalam fungsi benchmark?
+2. Dua jebakan apa pada pola `for i := 0; i < b.N; i++` yang ditutup oleh `for b.Loop()`?
 3. Kenapa membandingkan angka benchmark absolut dari mesin yang berbeda kurang bermakna dibanding membandingkan before-after pada mesin yang sama?
 4. Desain terbuka: kamu ingin memverifikasi klaim bahwa mengganti `interface{}` dengan generics (lihat [[../20 Go Language/Generics|Generics]]) pada sebuah fungsi utilitas yang dipanggil sangat sering benar-benar meningkatkan performa, bukan sekadar lebih type-safe. Rancang benchmark yang membandingkan kedua versi ini secara adil, dan sebutkan metrik apa saja (selain waktu eksekusi) yang perlu dibandingkan untuk mendapat gambaran lengkap.
 
@@ -163,7 +168,7 @@ Menulis benchmark untuk setiap fungsi kecil adalah usaha yang tidak selalu sepad
 ## Self-Check
 
 - Kenapa `b.N` ditentukan otomatis, bukan manual?
-- Apa fungsi `b.ResetTimer()` dan kapan ia dibutuhkan?
+- Apa yang dilakukan `b.Loop()` yang tidak dilakukan loop `b.N` klasik?
 - Kenapa data uji benchmark harus representatif terhadap kondisi production?
 - Tiga metrik apa yang ditampilkan `-benchmem`, dan kenapa ketiganya penting?
 

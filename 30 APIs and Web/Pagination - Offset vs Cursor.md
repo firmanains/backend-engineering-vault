@@ -93,6 +93,13 @@ func listPermohonanCursor(ctx context.Context, db *sql.DB, cursor *Cursor, limit
 
 Kombinasi `(created_at, id)` dipakai sebagai kolom pengurutan tepat karena `created_at` saja bisa punya nilai kembar (dua permohonan dibuat di detik yang sama) — menambahkan `id` (yang selalu unik) sebagai tie-breaker memastikan urutan benar-benar deterministik, prasyarat mutlak untuk cursor pagination bekerja benar.
 
+Satu catatan dialek yang penting untuk MariaDB/MySQL. Perbandingan *row constructor* `(created_at, id) > (?, ?)` benar secara semantik, tapi optimizer MySQL/MariaDB secara historis tidak selalu memakai index komposit untuk bentuk itu. Bentuk yang setara dan lebih mudah dioptimasi adalah `created_at > ? OR (created_at = ? AND id > ?)`. Jangan berasumsi salah satunya cepat: jalankan `EXPLAIN` (lihat [[../40 Databases/Reading EXPLAIN|Reading EXPLAIN]]) pada versi database yang benar-benar dipakai. PostgreSQL menangani bentuk row constructor dengan baik lewat index komposit.
+
+> [!question] Perlu diverifikasi
+> Klaim: optimizer MariaDB/MySQL tidak selalu memakai index komposit untuk perbandingan row constructor `(a, b) > (x, y)`.
+> Kenapa ragu: perilaku optimizer berubah antar versi, dan berbeda antara MySQL dan MariaDB.
+> Cara verifikasi: `EXPLAIN SELECT ... WHERE (created_at, id) > (...)` dibanding bentuk `OR` yang diekspansi, pada versi MariaDB produksi, lalu bandingkan kolom `type` dan `key`.
+
 ## In His Stack
 
 **Yii2** dengan komponen `Pagination` bawaannya (dipakai bersama `GridView`/`ActiveDataProvider`) secara default berbasis **offset** — inilah kenapa laporan atau daftar panjang di aplikasi Yii2 yang sudah berjalan lama sering terasa melambat drastis begitu pengguna membuka halaman-halaman jauh di belakang, dan kenapa daftar yang sering berubah (seperti antrean permohonan yang terus bertambah/berkurang) rawan menampilkan hasil yang tidak konsisten antar halaman — persis masalah yang dijelaskan di "The Problem".

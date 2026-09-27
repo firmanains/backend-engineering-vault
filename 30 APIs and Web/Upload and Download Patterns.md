@@ -47,6 +47,13 @@ flowchart LR
 Upload yang aman — key penyimpanan dihasilkan server, bukan dari nama file client:
 
 ```go
+// Ekstensi ditentukan dari jenis yang TERDETEKSI, bukan dari nama file client.
+var ekstensiDiizinkan = map[string]string{
+    "application/pdf": ".pdf",
+    "image/jpeg":      ".jpg",
+    "image/png":       ".png",
+}
+
 func uploadHandlerAman(w http.ResponseWriter, r *http.Request) {
     const maxUkuran = 20 << 20 // 20 MB
     r.Body = http.MaxBytesReader(w, r.Body, maxUkuran)
@@ -63,32 +70,52 @@ func uploadHandlerAman(w http.ResponseWriter, r *http.Request) {
     }
     defer file.Close()
 
-    // Sniff jenis file dari BYTE ASLINYA, jangan hanya percaya header.Header.Get("Content-Type")
+    // Sniff jenis file dari BYTE ASLINYA, jangan hanya percaya header.Header.Get("Content-Type").
+    // io.ReadFull memastikan 512 byte terbaca kalau file-nya memang sebesar itu;
+    // file yang lebih kecil menghasilkan ErrUnexpectedEOF, dan itu wajar.
     buf := make([]byte, 512)
-    n, _ := file.Read(buf)
+    n, err := io.ReadFull(file, buf)
+    if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+        http.Error(w, "gagal membaca file", http.StatusBadRequest)
+        return
+    }
     jenisTerdeteksi := http.DetectContentType(buf[:n])
-    if !jenisDiizinkan(jenisTerdeteksi) {
+    ext, ok := ekstensiDiizinkan[jenisTerdeteksi]
+    if !ok {
         http.Error(w, "jenis file tidak diizinkan", http.StatusUnsupportedMediaType)
         return
     }
-    file.Seek(0, io.SeekStart) // kembali ke awal setelah sniffing
+    if _, err := file.Seek(0, io.SeekStart); err != nil { // kembali ke awal setelah sniffing
+        http.Error(w, "gagal membaca file", http.StatusInternalServerError)
+        return
+    }
 
-    // Key penyimpanan dihasilkan SERVER, TIDAK PERNAH dari header.Filename langsung.
-    key := uuid.New().String() + filepath.Ext(header.Filename)
-    dst, err := os.Create(filepath.Join("/data/dokumen", key))
+    // Key penyimpanan dihasilkan SERVER, TIDAK PERNAH dari header.Filename.
+    key := uuid.New().String() + ext
+    path := filepath.Join("/data/dokumen", key)
+    dst, err := os.Create(path)
     if err != nil {
         http.Error(w, "gagal menyimpan", http.StatusInternalServerError)
         return
     }
-    defer dst.Close()
-
     if _, err := io.Copy(dst, file); err != nil {
+        dst.Close()
+        os.Remove(path)
         http.Error(w, "gagal menyalin file", http.StatusInternalServerError)
+        return
+    }
+    if err := dst.Close(); err != nil {
+        os.Remove(path)
+        http.Error(w, "gagal menyimpan", http.StatusInternalServerError)
         return
     }
 
     // Nama asli disimpan sebagai METADATA untuk ditampilkan, bukan sebagai path.
-    simpanMetadata(r.Context(), key, header.Filename)
+    if err := simpanMetadata(r.Context(), key, header.Filename); err != nil {
+        os.Remove(path)
+        http.Error(w, "gagal menyimpan metadata", http.StatusInternalServerError)
+        return
+    }
     respondJSON(w, http.StatusCreated, map[string]string{"key": key})
 }
 ```
@@ -96,8 +123,24 @@ func uploadHandlerAman(w http.ResponseWriter, r *http.Request) {
 Download dengan dukungan `Range` — `http.ServeContent` menangani ini otomatis kalau diberi `io.ReadSeeker`:
 
 ```go
+// Key yang valid hanya berbentuk hasil generate server (UUID + ekstensi).
+// Nilai wildcard dari ServeMux sudah di-unescape, jadi "..%2F..%2Fetc%2Fpasswd"
+// akan tiba sebagai "../../etc/passwd" kalau tidak divalidasi.
+var polaKey = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|jpg|png)$`)
+
 func downloadHandler(w http.ResponseWriter, r *http.Request) {
     key := r.PathValue("key")
+    if !polaKey.MatchString(key) {
+        http.Error(w, "file tidak ditemukan", http.StatusNotFound)
+        return
+    }
+
+    namaAsli, err := ambilNamaAsliDariMetadata(r.Context(), key)
+    if err != nil {
+        http.Error(w, "file tidak ditemukan", http.StatusNotFound)
+        return
+    }
+
     f, err := os.Open(filepath.Join("/data/dokumen", key))
     if err != nil {
         http.Error(w, "file tidak ditemukan", http.StatusNotFound)
@@ -105,15 +148,24 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
     }
     defer f.Close()
 
-    namaAsli := ambilNamaAsliDariMetadata(r.Context(), key)
-    w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", namaAsli))
+    fi, err := f.Stat()
+    if err != nil {
+        http.Error(w, "kesalahan internal", http.StatusInternalServerError)
+        return
+    }
 
-    fi, _ := f.Stat()
+    // mime.FormatMediaType meng-escape nama file dengan benar, termasuk
+    // karakter non-ASCII dan tanda kutip, sesuai aturan header MIME.
+    w.Header().Set("Content-Disposition",
+        mime.FormatMediaType("attachment", map[string]string{"filename": namaAsli}))
+
     // http.ServeContent MENANGANI header Range secara otomatis,
     // memungkinkan client melanjutkan unduhan yang terputus.
     http.ServeContent(w, r, namaAsli, fi.ModTime(), f)
 }
 ```
+
+Perhatikan validasi `polaKey` di awal handler download. Tanpa itu, handler download sendiri menjadi celah path traversal, karena nilai wildcard `{key}` dari `ServeMux` sudah di-unescape: `..%2F..%2Fetc%2Fpasswd` tiba sebagai `../../etc/passwd`. Sejak Go 1.24, `os.OpenRoot` memberi lapisan pertahanan tambahan: semua pembukaan file lewat `*os.Root` dijamin tidak keluar dari direktori akarnya.
 
 `http.ServeContent` secara otomatis merespons header `Range` dari client dengan `206 Partial Content` dan hanya mengirim byte yang diminta — client yang koneksinya terputus di tengah unduhan bisa meminta ulang hanya sisa byte yang belum diterima, bukan mengulang dari awal.
 

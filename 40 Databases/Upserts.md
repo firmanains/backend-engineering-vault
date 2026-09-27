@@ -21,16 +21,18 @@ Upsert berarti "insert kalau belum ada, update kalau sudah ada" — dilakukan se
 Sebuah service mencatat statistik "jumlah kunjungan per hari per instansi" — satu baris per kombinasi `(instansi_id, tanggal)`, di-increment setiap ada kunjungan baru. Kode awal ditulis sebagai dua langkah:
 
 ```go
+// Penanganan error di luar sql.ErrNoRows sengaja dihilangkan supaya
+// fokus pada race condition-nya, bukan contoh untuk ditiru.
 var jumlah int
 err := db.QueryRowContext(ctx, "SELECT jumlah FROM statistik_kunjungan WHERE instansi_id = ? AND tanggal = ?", instansiID, tanggal).Scan(&jumlah)
-if err == sql.ErrNoRows {
+if errors.Is(err, sql.ErrNoRows) {
     db.ExecContext(ctx, "INSERT INTO statistik_kunjungan (instansi_id, tanggal, jumlah) VALUES (?, ?, 1)", instansiID, tanggal)
 } else {
     db.ExecContext(ctx, "UPDATE statistik_kunjungan SET jumlah = ? WHERE instansi_id = ? AND tanggal = ?", jumlah+1, instansiID, tanggal)
 }
 ```
 
-Di beban rendah ini tampak bekerja. Tapi begitu dua request kunjungan untuk instansi dan tanggal yang sama datang **hampir bersamaan** (persis skenario aplikasi web bertraffic tinggi), keduanya bisa sama-sama menjalankan `SELECT` dan sama-sama mendapati `sql.ErrNoRows` **sebelum** salah satunya sempat menyelesaikan `INSERT`-nya — hasilnya dua `INSERT` untuk baris yang seharusnya satu, yang akan gagal dengan error duplicate key kalau ada unique constraint (baik, setidaknya kelihatan), atau — kalau tidak ada unique constraint — menghasilkan **dua baris statistik untuk kombinasi yang sama**, salah satunya dengan `jumlah = 1` yang seharusnya tidak pernah ada. Ini adalah [[../30 APIs and Web/Idempotency|read-modify-write race]] klasik — sama persis kelasnya dengan bug counter yang dibahas [[../94 Case Studies/Case - The Counter That Undercounts|di case study ini]].
+Di beban rendah ini tampak bekerja. Tapi begitu dua request kunjungan untuk instansi dan tanggal yang sama datang **hampir bersamaan** (persis skenario aplikasi web bertraffic tinggi), keduanya bisa sama-sama menjalankan `SELECT` dan sama-sama mendapati `sql.ErrNoRows` **sebelum** salah satunya sempat menyelesaikan `INSERT`-nya — hasilnya dua `INSERT` untuk baris yang seharusnya satu, yang akan gagal dengan error duplicate key kalau ada unique constraint (baik, setidaknya kelihatan), atau — kalau tidak ada unique constraint — menghasilkan **dua baris statistik untuk kombinasi yang sama**, salah satunya dengan `jumlah = 1` yang seharusnya tidak pernah ada. Ini adalah *read-modify-write race* klasik (mekanisme penguncian yang mencegahnya dibahas di [[Locking and Row Locks]]) — sama persis kelasnya dengan bug counter yang dibahas [[../94 Case Studies/Case - The Counter That Undercounts|di case study ini]].
 
 ## Intuition
 

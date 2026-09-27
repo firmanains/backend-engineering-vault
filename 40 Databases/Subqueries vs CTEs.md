@@ -78,15 +78,17 @@ Perhatikan `lampiran_per_permohonan` dipakai **dua kali** — sekali di `JOIN`, 
 CTE rekursif (`WITH RECURSIVE`) mengekspresikan sesuatu yang mustahil ditulis subquery biasa — misalnya menelusuri struktur hierarki:
 
 ```sql
-WITH RECURSIVE atasan_dari(pegawai_id, nama, level) AS (
-    SELECT id, nama, 0 FROM pegawai WHERE id = 42          -- anchor: titik awal
+WITH RECURSIVE rantai_atasan(pegawai_id, nama, atasan_id, level) AS (
+    SELECT id, nama, atasan_id, 0 FROM pegawai WHERE id = 42   -- anchor: titik awal
     UNION ALL
-    SELECT p.id, p.nama, a.level + 1                        -- recursive: naik satu level
+    SELECT p.id, p.nama, p.atasan_id, r.level + 1              -- recursive: naik satu level
     FROM pegawai p
-    JOIN atasan_dari a ON p.id = (SELECT atasan_id FROM pegawai WHERE id = a.pegawai_id)
+    JOIN rantai_atasan r ON p.id = r.atasan_id
 )
-SELECT * FROM atasan_dari ORDER BY level;
+SELECT * FROM rantai_atasan ORDER BY level;
 ```
+
+Rekursi berhenti sendiri begitu sampai di pegawai yang `atasan_id`-nya `NULL`: `JOIN` tidak lagi menemukan pasangan, sehingga iterasi berikutnya tidak menghasilkan baris baru. Kalau data berisi siklus (A atasan B, B atasan A), rekursi ini tidak pernah berhenti; batasi dengan syarat `WHERE r.level < 20` di bagian rekursif sebagai pengaman.
 
 ## In Go
 
@@ -143,7 +145,7 @@ func AmbilPermohonanDiAtasRataRata(ctx context.Context, db *sql.DB) ([]Permohona
 
 ## In His Stack
 
-Yii2 `ActiveQuery` tidak punya dukungan CTE bawaan yang idiomatic — kebanyakan proyek Yii2 yang butuh CTE menulisnya sebagai raw SQL lewat `Yii::$app->db->createCommand()`, keluar dari query builder sepenuhnya. Ini konsekuensi nyata yang layak dipertimbangkan saat memilih antara subquery bersarang (masih bisa diekspresikan lewat `ActiveQuery` biasa) dan CTE (biasanya butuh raw SQL) — trade-off keterbacaan CTE harus ditimbang lawan hilangnya proteksi query builder (escaping otomatis, dsb.) saat menulis raw SQL.
+Sejak Yii 2.0.35, query builder Yii2 punya `Query::withQuery($query, $alias, $recursive)` untuk menyusun klausa `WITH` (termasuk `WITH RECURSIVE`) tanpa keluar ke raw SQL. Proyek Yii2 yang lebih tua dari versi itu, atau tim yang belum tahu fitur ini, biasanya menulis CTE sebagai raw SQL lewat `Yii::$app->db->createCommand()`. Kalau itu yang terjadi, parameter dinamis tetap wajib diikat lewat placeholder (`:nama`) dan bukan disambung ke string, karena proteksi escaping otomatis query builder tidak ikut bekerja di raw SQL. Satu hal lagi yang perlu dicek: CTE di MariaDB baru tersedia sejak 10.2, jadi sistem legacy di versi lebih lama sama sekali tidak bisa memakainya.
 
 ## Trade-offs and When Not To Use It
 

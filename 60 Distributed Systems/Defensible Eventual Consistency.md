@@ -56,18 +56,18 @@ package readmodel
 
 import "time"
 
-// CaseSummary MENYERTAKAN indikator kesegaran EKSPLISIT — bukan
+// CaseSummary menyertakan indikator kesegaran eksplisit, bukan
 // menyembunyikan fakta bahwa data ini bisa tertinggal dari write model.
 type CaseSummary struct {
 	Status      string
 	LastUpdated time.Time
 }
 
-// FreshnessInfo dikembalikan BERSAMA data, membuat ketidakkonsistenan
-// yang mungkin ada TERLIHAT pengguna, bukan tersembunyi.
+// FreshnessInfo dikembalikan bersama data, membuat ketidakkonsistenan
+// yang mungkin ada terlihat pengguna, bukan tersembunyi.
 type FreshnessInfo struct {
-	Lag      time.Duration
-	IsStale  bool // true kalau lag melebihi ambang yang DISEPAKATI eksplisit
+	Lag     time.Duration
+	IsStale bool // true kalau lag melebihi ambang yang disepakati eksplisit
 }
 
 const acceptableLag = 10 * time.Second
@@ -80,8 +80,8 @@ func ComputeFreshness(lastUpdated time.Time) FreshnessInfo {
 	}
 }
 
-// MonitorSyncLag adalah bagian dari kontrak DEFENSIBLE — jeda
-// sinkronisasi DIUKUR dan DIPANTAU, bukan diasumsikan selalu kecil.
+// MonitorSyncLag adalah bagian dari kontrak yang defensible: jeda
+// sinkronisasi diukur dan dipantau, bukan diasumsikan selalu kecil.
 func MonitorSyncLag(currentLag time.Duration, alertThreshold time.Duration) (shouldAlert bool) {
 	return currentLag > alertThreshold
 }

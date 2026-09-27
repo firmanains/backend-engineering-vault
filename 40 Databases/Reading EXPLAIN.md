@@ -14,7 +14,7 @@ created: 2026-07-29
 
 ## TL;DR
 
-`EXPLAIN` meminta database menunjukkan **rencana eksekusi** (execution plan) yang akan dipakai untuk menjalankan sebuah query (index mana yang dipilih, urutan tabel mana yang dipindai lebih dulu pada `JOIN`, berapa perkiraan baris yang diperiksa), tanpa benar-benar menjalankan query itu. Ini adalah satu-satunya cara mengetahui **kenapa** sebuah query lambat, alih-alih menebak-nebak lewat trial and error (menambah index lalu berharap, tanpa pernah memverifikasi index itu benar-benar dipakai). Engineer yang bisa menulis query yang bekerja tapi tidak bisa membaca `EXPLAIN` akan terus menambal gejala tanpa pernah tahu akar masalahnya — persis kegelisahan yang dibuka di [[../40 Databases/_Overview|Databases Overview]].
+`EXPLAIN` meminta database menunjukkan **rencana eksekusi** (execution plan) yang akan dipakai untuk menjalankan sebuah query (index mana yang dipilih, urutan tabel mana yang dipindai lebih dulu pada `JOIN`, berapa perkiraan baris yang diperiksa), tanpa benar-benar menjalankan query itu. Ini adalah cara paling langsung untuk mengetahui **kenapa** sebuah query lambat, alih-alih menebak-nebak lewat trial and error (menambah index lalu berharap, tanpa pernah memverifikasi index itu benar-benar dipakai). Engineer yang bisa menulis query yang bekerja tapi tidak bisa membaca `EXPLAIN` akan terus menambal gejala tanpa pernah tahu akar masalahnya — persis kegelisahan yang dibuka di [[../40 Databases/_Overview|Databases Overview]].
 
 ## The Problem
 
@@ -62,12 +62,15 @@ Diagram ini menunjukkan spektrum nilai kolom `type` dari yang paling mahal (`ALL
 
 ## Under The Hood
 
-`EXPLAIN` menunjukkan rencana yang **akan** dipakai berdasarkan estimasi optimizer, bukan angka aktual dari eksekusi sungguhan. Untuk melihat perbedaan antara estimasi dan kenyataan (yang sering mengungkap masalah statistik usang), `EXPLAIN ANALYZE` (didukung PostgreSQL secara native, dan MySQL sejak versi yang cukup baru) benar-benar **menjalankan** query dan melaporkan waktu eksekusi aktual di setiap langkah, dibandingkan dengan estimasi. Selisih besar antara `rows` yang diestimasi dan baris aktual yang diproses adalah sinyal paling jelas bahwa statistik tabel (dipelihara lewat `ANALYZE TABLE` di MySQL, atau `ANALYZE` di PostgreSQL, biasanya juga berjalan otomatis lewat *autovacuum*) sudah usang dan perlu diperbarui.
+`EXPLAIN` menunjukkan rencana yang **akan** dipakai berdasarkan estimasi optimizer, bukan angka aktual dari eksekusi sungguhan. Untuk melihat selisih antara estimasi dan kenyataan (yang sering mengungkap statistik usang), ketiga database punya perintah yang benar-benar **menjalankan** query lalu melaporkan angka aktual di setiap langkah. Sintaksnya berbeda:
 
-> [!question] Perlu diverifikasi
-> Klaim: sejak versi berapa MySQL mendukung `EXPLAIN ANALYZE`.
-> Kenapa ragu: dukungan fitur ini ditambahkan di rilis MySQL yang relatif baru, dan detail versi minimum persisnya sebaiknya dicek langsung agar tidak keliru menyebut versi yang belum mendukungnya.
-> Cara verifikasi: cek changelog resmi MySQL untuk fitur `EXPLAIN ANALYZE`.
+| Database | Perintah | Catatan |
+|---|---|---|
+| PostgreSQL | `EXPLAIN ANALYZE ...` | Berlaku untuk semua jenis statement, termasuk `UPDATE`/`DELETE` |
+| MySQL | `EXPLAIN ANALYZE ...` | Sejak MySQL 8.0.18; untuk `SELECT` serta `UPDATE`/`DELETE` multi-tabel |
+| MariaDB | `ANALYZE ...` (atau `ANALYZE FORMAT=JSON ...`) | MariaDB tidak memakai sintaks `EXPLAIN ANALYZE`; `ANALYZE UPDATE`/`DELETE` benar-benar mengubah data |
+
+Selisih besar antara `rows` yang diestimasi dan baris aktual yang diproses adalah sinyal paling jelas bahwa statistik tabel sudah usang. Statistik dipelihara lewat `ANALYZE TABLE` di MySQL/MariaDB, atau `ANALYZE` di PostgreSQL (yang biasanya juga dijalankan otomatis oleh *autovacuum*). Hati-hati dengan namanya di MariaDB: `ANALYZE TABLE t` memperbarui statistik, sedangkan `ANALYZE SELECT ...` menjalankan query dan menampilkan rencananya. Keduanya perintah yang berbeda.
 
 PostgreSQL menyediakan format output yang sedikit berbeda (`Seq Scan`, `Index Scan`, `Bitmap Heap Scan`, `Nested Loop`, `Hash Join`, `Merge Join`) tapi filosofi membacanya identik: cari operasi yang memindai banyak baris tanpa perlu (`Seq Scan` pada tabel besar dengan kondisi selektif), cari langkah dengan selisih besar antara `estimated rows` dan `actual rows`, dan perhatikan strategi join yang dipilih. `Nested Loop` cocok untuk hasil kecil di satu sisi join, tapi bisa sangat mahal kalau kedua sisi besar — di kasus itu, `Hash Join` biasanya lebih efisien.
 
@@ -83,9 +86,15 @@ import (
 )
 
 // JalankanExplain menjalankan EXPLAIN terhadap query yang sama persis
-// dengan yang dipakai aplikasi — penting menjalankan EXPLAIN pada query
-// SESUNGGUHNYA (termasuk parameter yang representatif), karena rencana
-// eksekusi bisa berbeda tergantung nilai parameter untuk beberapa jenis query.
+// dengan yang dipakai aplikasi. Jalankan EXPLAIN pada query sesungguhnya
+// (termasuk parameter yang representatif), karena rencana eksekusi bisa
+// berbeda tergantung nilai parameter.
+//
+// Catatan dialek: MySQL tidak mengizinkan EXPLAIN lewat protokol prepared
+// statement. Dengan go-sql-driver/mysql, *sql.DB untuk fungsi ini harus
+// dibuka dengan DSN berisi interpolateParams=true, supaya driver menyisipkan
+// parameter di sisi klien alih-alih mengirim PREPARE. MariaDB 10.6.2+
+// mengizinkan EXPLAIN di-prepare, jadi opsi itu tidak wajib di sana.
 func JalankanExplain(ctx context.Context, db *sql.DB, status string) ([]map[string]any, error) {
 	rows, err := db.QueryContext(ctx, `
 		EXPLAIN SELECT p.id, p.nomor_permohonan, d.nama_file
@@ -116,9 +125,18 @@ func JalankanExplain(ctx context.Context, db *sql.DB, status string) ([]map[stri
 
 		baris := make(map[string]any, len(kolom))
 		for i, nama := range kolom {
+			// Driver MySQL mengembalikan kolom teks sebagai []byte;
+			// ubah ke string supaya hasilnya terbaca saat di-log.
+			if b, ok := nilai[i].([]byte); ok {
+				baris[nama] = string(b)
+				continue
+			}
 			baris[nama] = nilai[i]
 		}
 		hasil = append(hasil, baris)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi hasil EXPLAIN: %w", err)
 	}
 	return hasil, nil
 }
@@ -132,7 +150,7 @@ MariaDB dan PostgreSQL punya format output `EXPLAIN` yang berbeda secara sintaks
 
 ## Trade-offs and When Not To Use It
 
-`EXPLAIN` sendiri (tanpa `ANALYZE`) nyaris tidak punya biaya. Ia hanya meminta optimizer menunjukkan rencananya tanpa benar-benar menjalankan query, aman dipakai kapan pun termasuk terhadap query yang mengubah data (meski untuk `INSERT`/`UPDATE`/`DELETE`, sebagian database perlu penanganan berbeda untuk melihat rencananya tanpa efek samping). `EXPLAIN ANALYZE`, sebaliknya, **benar-benar menjalankan** query. Untuk query yang mengubah data atau query `SELECT` yang sangat berat, ini berarti biaya eksekusi sungguhan ditanggung, dan untuk `UPDATE`/`DELETE` bisa berarti perubahan data sungguhan terjadi (tergantung dialek dan cara pemakaiannya). `EXPLAIN ANALYZE` pada query yang mengubah data di database production butuh kehati-hatian ekstra, idealnya diuji dulu di replica atau lingkungan staging dengan data representatif.
+`EXPLAIN` sendiri (tanpa `ANALYZE`) nyaris tidak punya biaya. Ia hanya meminta optimizer menunjukkan rencananya tanpa benar-benar menjalankan query, aman dipakai kapan pun termasuk terhadap query yang mengubah data (meski untuk `INSERT`/`UPDATE`/`DELETE`, sebagian database perlu penanganan berbeda untuk melihat rencananya tanpa efek samping). `EXPLAIN ANALYZE`, sebaliknya, **benar-benar menjalankan** query. Untuk query yang mengubah data atau query `SELECT` yang sangat berat, ini berarti biaya eksekusi sungguhan ditanggung, dan untuk `UPDATE`/`DELETE` bisa berarti perubahan data sungguhan terjadi (tergantung dialek dan cara pemakaiannya). `EXPLAIN ANALYZE` pada query yang mengubah data di database production butuh kehati-hatian ekstra, idealnya diuji dulu di replica atau lingkungan staging dengan data representatif. Di PostgreSQL, trik yang umum adalah membungkusnya dalam transaction lalu membatalkannya: `BEGIN; EXPLAIN ANALYZE UPDATE ...; ROLLBACK;`. Perubahan datanya dibatalkan, tapi lock tetap diambil selama transaction berjalan.
 
 ## Common Mistakes
 
@@ -169,7 +187,8 @@ MariaDB dan PostgreSQL punya format output `EXPLAIN` yang berbeda secara sintaks
 - [[Composite Indexes and the Leftmost-Prefix Rule]] — `EXPLAIN` adalah alat verifikasi utama untuk memastikan composite index benar-benar dipakai sesuai leftmost-prefix rule.
 - [[The N+1 Query Problem]] — `EXPLAIN` terhadap query individual dalam pola N+1 sering menunjukkan setiap query kecil itu sendiri sudah efisien, menyembunyikan bahwa masalah sesungguhnya ada di jumlah query, bukan rencana eksekusi satu query.
 - [[../70 Infrastructure and Delivery/The Three Pillars of Observability|The Three Pillars of Observability]] — slow query log yang menangkap query lambat adalah titik masuk paling umum untuk tahu query mana yang perlu dianalisis lewat EXPLAIN.
-- [[Isolation Levels and Their Anomalies]] — rencana eksekusi yang ditunjukkan EXPLAIN bisa berbeda tergantung isolation level yang aktif, terutama untuk query yang membaca data yang sedang diubah transaksi lain.
+- [[Locking and Row Locks]] — di InnoDB, `UPDATE` atau `SELECT ... FOR UPDATE` mengunci setiap baris yang dipindai, bukan hanya yang cocok; rencana dengan `rows` besar di `EXPLAIN` berarti lock yang lebih luas, sehingga EXPLAIN juga alat diagnosis lock contention.
+- [[Isolation Levels and Their Anomalies]] — note berikutnya di reading order; rencana eksekusi tidak bergantung pada isolation level, tapi jumlah baris yang dipindai menentukan seberapa banyak lock yang diambil di level `REPEATABLE READ` dan `SERIALIZABLE`.
 
 ## Further Reading
 

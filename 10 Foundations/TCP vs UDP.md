@@ -14,7 +14,7 @@ created: 2026-07-26
 
 ## TL;DR
 
-**TCP** menjamin data sampai lengkap, berurutan, dan tanpa duplikasi — dengan harga berupa handshake di awal (lihat [[TCP Handshake and Connection Lifecycle]]), acknowledgment untuk setiap segmen, dan retransmisi otomatis kalau ada yang hilang. **UDP** tidak menjamin apa pun dari itu — ia hanya melempar datagram ke jaringan dan berharap sampai, tanpa koneksi, tanpa acknowledgment, tanpa retransmisi. Trade-off-nya bukan "TCP selalu lebih aman jadi selalu dipakai" — UDP dipilih justru ketika overhead jaminan itu lebih mahal daripada manfaatnya, misalnya saat data yang sedikit hilang masih bisa diterima sistem, atau saat data terbaru selalu lebih berharga daripada data lama yang terlambat.
+**TCP** menjamin data diserahkan ke aplikasi secara lengkap, berurutan, dan tanpa duplikasi, atau koneksinya dinyatakan gagal. Harganya berupa handshake di awal (lihat [[TCP Handshake and Connection Lifecycle]]), acknowledgment dari penerima, dan retransmisi otomatis kalau ada yang hilang. **UDP** tidak menjamin apa pun dari itu — ia hanya melempar datagram ke jaringan dan berharap sampai, tanpa koneksi, tanpa acknowledgment, tanpa retransmisi. Trade-off-nya bukan "TCP selalu lebih aman jadi selalu dipakai" — UDP dipilih justru ketika overhead jaminan itu lebih mahal daripada manfaatnya, misalnya saat data yang sedikit hilang masih bisa diterima sistem, atau saat data terbaru selalu lebih berharga daripada data lama yang terlambat.
 
 ## The Problem
 
@@ -30,7 +30,7 @@ Analogi ini bocor di satu hal: biaya "paket tercatat" di TCP bukan berasal dari 
 
 ## How It Works
 
-**TCP** adalah protokol connection-oriented: sebelum data mengalir, kedua sisi menyepakati koneksi lewat handshake, lalu setiap segmen data diberi sequence number dan menunggu acknowledgment dari penerima. Kalau acknowledgment tidak diterima dalam waktu tertentu, pengirim menganggap segmen itu hilang dan mengirim ulang. TCP juga menjaga urutan — kalau segmen tiba tidak berurutan, TCP menahannya di buffer sampai segmen yang hilang di antaranya tiba, baru menyerahkan data ke aplikasi dalam urutan yang benar.
+**TCP** adalah protokol connection-oriented: sebelum data mengalir, kedua sisi menyepakati koneksi lewat handshake, lalu setiap byte data diberi sequence number dan penerima mengirim acknowledgment kumulatif ("sudah kuterima semuanya sampai byte ke-N"). Pengirim tidak menunggu ACK untuk setiap segmen sebelum mengirim segmen berikutnya. Ia boleh mengirim sejumlah data sekaligus selama masih muat di *window* (batas yang diatur flow control dan congestion control). Kalau acknowledgment untuk sebuah data tidak datang dalam waktu tertentu, pengirim menganggapnya hilang dan mengirim ulang. TCP juga menjaga urutan — kalau segmen tiba tidak berurutan, TCP menahannya di buffer sampai segmen yang hilang di antaranya tiba, baru menyerahkan data ke aplikasi dalam urutan yang benar.
 
 **UDP** tidak punya konsep koneksi sama sekali. Setiap datagram dikirim independen, dengan header yang jauh lebih kecil (hanya berisi port sumber, port tujuan, panjang, dan checksum), tanpa sequence number yang dijaga protokolnya, tanpa acknowledgment, tanpa retransmisi. Kalau aplikasi butuh tahu datagram mana yang hilang atau urutan aslinya, aplikasi itu sendiri yang harus membangun mekanismenya.
 
@@ -38,10 +38,10 @@ Analogi ini bocor di satu hal: biaya "paket tercatat" di TCP bukan berasal dari 
 flowchart TB
     subgraph TCP["TCP"]
         direction TB
-        T1["Handshake dulu"] --> T2["Kirim segmen + sequence number"]
-        T2 --> T3["Tunggu ACK"]
-        T3 -->|"tidak ada ACK"| T4["Kirim ulang"]
-        T3 -->|"ACK diterima"| T5["Lanjut segmen berikutnya"]
+        T1["Handshake dulu"] --> T2["Kirim beberapa segmen\n(sebanyak window mengizinkan)"]
+        T2 --> T3["Terima ACK kumulatif"]
+        T3 -->|"ACK tidak datang\n(timeout / duplicate ACK)"| T4["Kirim ulang yang hilang"]
+        T3 -->|"ACK diterima"| T5["Window bergeser,\nkirim data berikutnya"]
     end
     subgraph UDP["UDP"]
         direction TB

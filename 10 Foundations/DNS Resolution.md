@@ -35,7 +35,7 @@ Proses resolusi penuh (disederhanakan, mengasumsikan tidak ada yang di-cache sam
 ```mermaid
 sequenceDiagram
     participant App as Aplikasimu
-    participant R as Resolver (OS/lokal)
+    participant R as Recursive Resolver (hulu)
     participant Root as Root Server
     participant TLD as TLD Server (.id)
     participant Auth as Authoritative Nameserver
@@ -51,7 +51,7 @@ sequenceDiagram
     Note over R: hasil ini di-cache sampai TTL habis
 ```
 
-Di laptop desktop, resolver lokal biasanya memang melakukan cache. **Di server Linux, sering kali tidak ada cache lokal sama sekali** — glibc tidak melakukan cache DNS, dan resolver murni-Go yang dipakai `net.Resolver` juga tidak. Yang melakukan cache biasanya adalah recursive resolver di hulu (DNS milik cloud provider, atau CoreDNS di dalam cluster Kubernetes). Konsekuensi praktisnya: saat mendiagnosis "kenapa perubahan DNS partner belum terasa", tempat yang perlu diperiksa adalah resolver hulu dan **connection pool aplikasimu sendiri** — bukan cache di mesin aplikasi yang mungkin memang tidak pernah ada.
+Di laptop desktop, resolver lokal biasanya memang melakukan cache. **Di server Linux, sering kali tidak ada cache lokal sama sekali** — glibc tidak melakukan cache DNS, dan resolver murni-Go yang dipakai `net.Resolver` juga tidak. Pengecualiannya adalah distro yang memasang daemon cache lokal seperti `systemd-resolved` atau `nscd`, jadi periksa apa yang berjalan di server-mu. Di diagram di atas, OS hanya berperan sebagai *stub resolver* yang meneruskan pertanyaan; recursive resolver di hulu yang melakukan penelusuran root → TLD → authoritative. Yang melakukan cache biasanya adalah recursive resolver di hulu (DNS milik cloud provider, atau CoreDNS di dalam cluster Kubernetes). Konsekuensi praktisnya: saat mendiagnosis "kenapa perubahan DNS partner belum terasa", tempat yang perlu diperiksa adalah resolver hulu dan **connection pool aplikasimu sendiri** — bukan cache di mesin aplikasi yang mungkin memang tidak pernah ada.
 
 **TTL** (time-to-live) yang disertakan authoritative nameserver menentukan berapa lama hasil ini boleh dianggap valid sebelum ditanyakan ulang di lapisan mana pun yang melakukan cache — TTL pendek berarti perubahan IP terasa lebih cepat tapi lebih sering membebani nameserver dengan query; TTL panjang sebaliknya.
 
@@ -86,6 +86,8 @@ var partnerClient = &http.Client{
 ```
 
 Trade-off dari `IdleConnTimeout` yang pendek: koneksi lebih sering dibuka ulang (mengulang biaya handshake TCP dan resolusi DNS), tapi service-mu bereaksi lebih cepat kalau partner mengubah IP mereka. Ini keputusan yang harus disengaja, bukan default yang dibiarkan begitu saja.
+
+Batasnya perlu dipahami: `IdleConnTimeout` hanya menutup koneksi yang **menganggur** selama durasi itu. Kalau service-mu memanggil partner terus-menerus (misalnya setiap detik), koneksinya tidak pernah menganggur 30 detik, dan ia bisa tetap menempel ke IP lama tanpa batas waktu. Untuk kasus ini, perlu mekanisme tambahan, misalnya memanggil `Transport.CloseIdleConnections()` secara berkala dari goroutine terpisah, atau mengandalkan server/load balancer partner yang membatasi umur koneksi dari sisinya.
 
 ## In His Stack
 

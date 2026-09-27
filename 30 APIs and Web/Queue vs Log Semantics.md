@@ -57,7 +57,7 @@ Konsekuensi dari perbedaan ini menjalar ke banyak keputusan desain lain:
 
 Kafka, yang sudah ada di ekosistem, adalah implementasi model log — cocok untuk kasus seperti event sourcing internal, feed audit, atau ketika beberapa service perlu mengonsumsi stream event yang sama secara independen (misalnya service notifikasi dan service laporan sama-sama membaca event "permohonan dibuat" tanpa saling mengenal). RabbitMQ (kalaupun belum dipakai, sering muncul sebagai pembanding) mewakili model queue — lebih cocok untuk task queue klasik: job yang harus dikerjakan tepat sekali oleh tepat satu worker, seperti mengirim satu email atau memproses satu file upload, di mana riwayat pesan yang sudah selesai memang tidak relevan disimpan.
 
-Untuk sistem legal-services yang punya kebutuhan audit trail kuat (pemerintah sering mensyaratkan riwayat lengkap siapa melakukan apa dan kapan), model log punya keunggulan alami: riwayat itu sudah ada di topic itu sendiri, bukan sesuatu yang harus dibangun terpisah di atas sistem pesan yang sifatnya sekali pakai.
+Untuk sistem legal-services yang punya kebutuhan audit trail kuat (pemerintah sering mensyaratkan riwayat lengkap siapa melakukan apa dan kapan), model log punya keunggulan alami: riwayat itu sudah ada di topic itu sendiri, bukan sesuatu yang harus dibangun terpisah di atas sistem pesan yang sifatnya sekali pakai. Batasnya perlu diingat: riwayat itu hanya ada selama masa retensi topic, dan topic bukan tempat yang dirancang untuk kueri audit bertahun-tahun. Untuk kewajiban audit jangka panjang, topic berfungsi sebagai sumber yang dialirkan ke penyimpanan audit tersendiri, bukan sebagai penyimpanan audit itu sendiri (lihat [[../80 Security/Audit Logging|Audit Logging]]).
 
 ## Trade-offs and When Not To Use It
 

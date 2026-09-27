@@ -14,7 +14,7 @@ created: 2026-07-29
 
 ## TL;DR
 
-MVCC (Multi-Version Concurrency Control) adalah jawaban mengapa database modern bisa memberi setiap transaction "tampilan" data yang konsisten tanpa memaksa pembaca menunggu penulis, atau penulis menunggu pembaca — sesuatu yang di [[Basic Isolation Levels]] disebut sebagai kemungkinan mekanis tanpa dijelaskan caranya. Alih-alih menimpa baris lama begitu di-`UPDATE`, database menyimpan **beberapa versi** baris yang sama sekaligus, masing-masing ditandai kapan versi itu dibuat dan (kalau sudah usang) kapan digantikan. Setiap transaction melihat versi yang konsisten dengan **snapshot** waktu mulainya sendiri, mengabaikan versi yang dibuat oleh transaction lain yang belum `commit` — tanpa perlu mengunci baris yang sedang dibaca sama sekali.
+MVCC (Multi-Version Concurrency Control) adalah jawaban mengapa database modern bisa memberi setiap transaction "tampilan" data yang konsisten tanpa memaksa pembaca menunggu penulis, atau penulis menunggu pembaca — sesuatu yang di [[Basic Isolation Levels]] disebut sebagai kemungkinan mekanis tanpa dijelaskan caranya. Alih-alih menimpa baris lama begitu di-`UPDATE`, database menyimpan **beberapa versi** baris yang sama sekaligus, masing-masing ditandai kapan versi itu dibuat dan (kalau sudah usang) kapan digantikan. Setiap pembacaan melihat versi yang konsisten dengan sebuah **snapshot**, dan mengabaikan versi dari transaction yang belum `commit` saat snapshot itu diambil. Di `REPEATABLE READ`, snapshot diambil sekali untuk seluruh transaction; di `READ COMMITTED`, snapshot baru diambil untuk setiap statement. Pembacaan biasa (bukan `SELECT ... FOR UPDATE`) tidak perlu mengunci baris yang dibacanya.
 
 ## The Problem
 
@@ -54,7 +54,7 @@ Diagram ini menunjukkan inti MVCC: `Transaction 2` tidak pernah menimpa Versi A 
 
 ## Under The Hood
 
-Di PostgreSQL, snapshot diambil saat statement **pertama** dijalankan, bukan saat `BEGIN`. Membuka transaction lalu menunggu sebelum query pertama berarti snapshot-nya diambil di waktu yang lebih akhir dari yang mungkin kamu kira — hal yang perlu diperhatikan kalau titik waktu snapshot itu penting secara bisnis.
+Di level `REPEATABLE READ`, PostgreSQL dan InnoDB sama-sama mengambil snapshot saat statement **pertama** yang membaca data dijalankan, bukan saat `BEGIN`. Membuka transaction lalu menunggu sebelum query pertama berarti snapshot-nya diambil lebih akhir dari yang mungkin kamu kira. InnoDB menyediakan `START TRANSACTION WITH CONSISTENT SNAPSHOT` kalau snapshot harus diambil tepat saat transaction dimulai.
 
 Konsekuensi paling praktis dari perbedaan implementasi ini: **transaction PostgreSQL yang berjalan lama** (long-running transaction) sambil banyak `UPDATE` terjadi di tabel yang sama menyebabkan banyak dead tuple menumpuk **karena** `VACUUM` tidak bisa membersihkan versi apa pun yang mungkin masih dibutuhkan transaction tua itu — dikenal sebagai masalah *table bloat*, di mana ukuran fisik tabel membengkak jauh melebihi data yang sebenarnya aktif. **Transaction InnoDB yang berjalan lama**, sebaliknya, menyebabkan undo log terus membengkak karena harus mempertahankan cukup banyak riwayat perubahan untuk merekonstruksi versi lama yang mungkin masih dibutuhkan — keduanya sama-sama bermasalah, hanya termanifestasi di tempat fisik yang berbeda (tabel utama vs undo log), dan keduanya adalah alasan konkret kenapa transaction yang dibiarkan terbuka lama (misalnya lupa `COMMIT`/`ROLLBACK`, atau menahan transaction untuk operasi yang tidak perlu) adalah masalah operasional nyata, bukan sekadar gaya penulisan kode yang kurang rapi.
 
@@ -71,44 +71,56 @@ import (
 	"fmt"
 )
 
-// HitungTotalSaldoSnapshot memanfaatkan MVCC secara implisit: dengan
-// membuka satu transaction REPEATABLE READ, seluruh SELECT di dalamnya
-// melihat snapshot yang konsisten sejak query pertama di dalam transaction
-// dijalankan — TANPA mengunci tabel rekening sama sekali, meski transaksi
-// lain terus mengubah saldo di latar belakang selama laporan ini berjalan.
-func HitungTotalSaldoSnapshot(ctx context.Context, db *sql.DB) (int64, error) {
+// RingkasanRekening dikembalikan sebagai satu paket supaya kedua angka
+// dijamin berasal dari snapshot yang sama.
+type RingkasanRekening struct {
+	TotalSaldo          string // DECIMAL dibaca sebagai string agar tidak kehilangan presisi
+	JumlahRekeningAktif int64
+}
+
+// HitungRingkasanSnapshot memanfaatkan MVCC secara implisit. Dengan satu
+// transaction REPEATABLE READ, kedua SELECT di dalamnya melihat snapshot yang
+// sama (diambil saat query pertama berjalan), tanpa mengunci tabel rekening,
+// meski transaction lain terus mengubah saldo selama laporan ini berjalan.
+func HitungRingkasanSnapshot(ctx context.Context, db *sql.DB) (*RingkasanRekening, error) {
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,
-		ReadOnly:  true, // menandai eksplisit bahwa transaction ini tidak menulis apa pun
+		ReadOnly:  true, // database menolak penulisan di transaction ini
 	})
 	if err != nil {
-		return 0, fmt.Errorf("mulai transaction snapshot: %w", err)
+		return nil, fmt.Errorf("mulai transaction snapshot: %w", err)
 	}
 	defer tx.Rollback()
 
-	var total int64
-	if err := tx.QueryRowContext(ctx, `SELECT SUM(saldo) FROM rekening`).Scan(&total); err != nil {
-		return 0, fmt.Errorf("hitung total saldo: %w", err)
+	var r RingkasanRekening
+	// COALESCE: SUM atas tabel kosong menghasilkan NULL, bukan 0.
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(saldo), 0) FROM rekening`,
+	).Scan(&r.TotalSaldo); err != nil {
+		return nil, fmt.Errorf("hitung total saldo: %w", err)
 	}
 
-	// Baris kedua ini, meski dijalankan detik berikutnya, TETAP melihat
-	// snapshot yang sama seperti query pertama, berkat MVCC + REPEATABLE READ —
-	// tidak ada perubahan dari transaction lain yang terlihat di sini,
-	// meski mereka sudah commit di antara kedua query ini.
-	var jumlahRekeningAktif int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM rekening WHERE status = 'aktif'`).Scan(&jumlahRekeningAktif); err != nil {
-		return 0, fmt.Errorf("hitung rekening aktif: %w", err)
+	// Query kedua ini, meski berjalan belakangan, tetap melihat snapshot yang
+	// sama dengan query pertama. Perubahan yang di-commit transaction lain di
+	// antara kedua query tidak terlihat di sini.
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM rekening WHERE status = 'aktif'`,
+	).Scan(&r.JumlahRekeningAktif); err != nil {
+		return nil, fmt.Errorf("hitung rekening aktif: %w", err)
 	}
 
-	return total, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit transaction snapshot: %w", err)
+	}
+	return &r, nil
 }
 ```
 
-Penting: `ReadOnly: true` di `sql.TxOptions` bukan sekadar dokumentasi niat — di beberapa database, menandai transaction sebagai read-only memberi optimizer informasi tambahan (transaction ini tidak akan pernah butuh menahan lock tulis) yang bisa dimanfaatkan untuk optimasi resource, dan juga membantu menjaga disiplin kode bahwa transaction ini memang murni untuk membaca snapshot konsisten, bukan tempat menulis yang lupa ditandai.
+`ReadOnly: true` di `sql.TxOptions` bukan sekadar dokumentasi niat. Database akan menolak `INSERT`/`UPDATE` yang tidak sengaja ditulis di dalam transaction ini. Di InnoDB, transaction yang ditandai read-only juga tidak perlu diberi transaction ID, sehingga overhead internalnya lebih kecil. Kalau kamu hanya butuh satu query, transaction ini tidak perlu: satu statement sudah melihat snapshot yang konsisten dengan sendirinya.
 
 ## In His Stack
 
-MariaDB (InnoDB) dan PostgreSQL sama-sama memakai MVCC sebagai fondasi, tapi konsekuensi operasionalnya berbeda cukup jauh — inilah kenapa "transaction yang lupa di-`commit`/`rollback`" adalah kelas bug operasional yang perlu penanganan berbeda di kedua mesin: di PostgreSQL, ini terlihat sebagai `pg_stat_activity` yang menunjukkan transaction idle-in-transaction berumur panjang, dan tabel yang bloat karena `VACUUM` tertahan; di MariaDB/InnoDB, ini terlihat sebagai `information_schema.INNODB_TRX` yang menunjukkan transaction lama, dan ukuran undo log (`ibdata`/undo tablespace) yang membengkak. Memantau metrik ini secara eksplisit (bukan hanya memantau CPU/memori server) adalah kebiasaan operasional yang layak dibangun untuk sistem dengan volume transaksi tinggi.
+MariaDB (InnoDB) dan PostgreSQL sama-sama memakai MVCC sebagai fondasi, tapi konsekuensi operasionalnya berbeda cukup jauh — inilah kenapa "transaction yang lupa di-`commit`/`rollback`" adalah kelas bug operasional yang perlu penanganan berbeda di kedua mesin: di PostgreSQL, ini terlihat sebagai `pg_stat_activity` yang menunjukkan transaction idle-in-transaction berumur panjang, dan tabel yang bloat karena `VACUUM` tertahan; di MariaDB/InnoDB, ini terlihat sebagai `information_schema.INNODB_TRX` yang menunjukkan transaction lama, angka *History list length* yang terus naik di `SHOW ENGINE INNODB STATUS` (jumlah perubahan yang belum bisa di-purge), dan ukuran undo log (`ibdata`/undo tablespace) yang membengkak. Memantau metrik ini secara eksplisit (bukan hanya memantau CPU/memori server) adalah kebiasaan operasional yang layak dibangun untuk sistem dengan volume transaksi tinggi.
 
 ## Trade-offs and When Not To Use It
 
@@ -133,8 +145,8 @@ MVCC bukan tanpa biaya — menyimpan banyak versi (PostgreSQL) atau undo log (In
 4. Desain terbuka: tim operasionalmu melaporkan bahwa ukuran fisik tabel `transaksi_harian` di PostgreSQL terus membengkak jauh melebihi jumlah baris aktif yang sebenarnya, meski `DELETE` rutin dijalankan untuk membersihkan data lama. Rancang langkah investigasi untuk menemukan penyebabnya (dengan mempertimbangkan konsep MVCC dan `VACUUM` di note ini), dan sebutkan dua kemungkinan akar masalah yang paling umum.
 
 > [!success]- Kunci jawaban
-> **1.** MVCC memungkinkan ini karena `SELECT` tidak pernah perlu mengunci baris sama sekali — ia cukup membaca versi yang sesuai dengan snapshot transaction-nya sendiri (versi yang sudah `commit` sebelum snapshot itu dimulai), mengabaikan versi yang lebih baru yang mungkin sedang dibuat transaction lain. Karena pembaca tidak pernah menunggu penulis "selesai" (ia langsung memakai versi lama yang sudah pasti final), dan penulis tidak perlu menunggu pembaca "selesai membaca" (versi lama tetap ada, tidak ditimpa langsung), keduanya bisa berjalan bersamaan tanpa saling memblokir.
-> **4.** Investigasi: (1) periksa `pg_stat_activity` untuk transaction yang berjalan lama atau berstatus idle-in-transaction — ini kandidat utama yang mencegah `VACUUM` membersihkan dead tuple karena versi lama masih "mungkin dibutuhkan" transaction tersebut; (2) periksa apakah `autovacuum` benar-benar berjalan dan menyelesaikan pekerjaannya untuk tabel ini (lewat `pg_stat_user_tables`, kolom `last_autovacuum` dan `n_dead_tup`) — autovacuum bisa tertinggal kalau parameter threshold-nya tidak sesuai dengan volume perubahan tabel yang sangat tinggi. Dua akar masalah paling umum: (a) ada koneksi atau proses yang membuka transaction lama tanpa pernah `commit`/`rollback` (bug aplikasi, atau connection pool yang salah konfigurasi menahan transaction), mencegah dead tuple lama dibersihkan; (b) `autovacuum` tidak cukup agresif untuk volume perubahan tabel ini (parameter default yang tidak disesuaikan untuk tabel dengan `DELETE`/`UPDATE` sangat sering), butuh tuning parameter autovacuum khusus untuk tabel ini, bukan mengandalkan setting default untuk seluruh database.
+> **1.** MVCC memungkinkan ini karena `SELECT` biasa (bukan `SELECT ... FOR UPDATE`, dan bukan di `SERIALIZABLE` InnoDB) tidak perlu mengunci baris — ia cukup membaca versi yang sesuai dengan snapshot transaction-nya sendiri (versi yang sudah `commit` sebelum snapshot itu dimulai), mengabaikan versi yang lebih baru yang mungkin sedang dibuat transaction lain. Karena pembaca tidak pernah menunggu penulis "selesai" (ia langsung memakai versi lama yang sudah pasti final), dan penulis tidak perlu menunggu pembaca "selesai membaca" (versi lama tetap ada, tidak ditimpa langsung), keduanya bisa berjalan bersamaan tanpa saling memblokir.
+> **4.** Investigasi: (1) periksa `pg_stat_activity` untuk transaction yang berjalan lama atau berstatus idle-in-transaction — ini kandidat utama yang mencegah `VACUUM` membersihkan dead tuple karena versi lama masih "mungkin dibutuhkan" transaction tersebut; (2) periksa apakah `autovacuum` benar-benar berjalan dan menyelesaikan pekerjaannya untuk tabel ini (lewat `pg_stat_user_tables`, kolom `last_autovacuum` dan `n_dead_tup`) — autovacuum bisa tertinggal kalau parameter threshold-nya tidak sesuai dengan volume perubahan tabel yang sangat tinggi. Dua akar masalah paling umum: (a) ada koneksi atau proses yang membuka transaction lama tanpa pernah `commit`/`rollback` (bug aplikasi, atau connection pool yang salah konfigurasi menahan transaction), mencegah dead tuple lama dibersihkan; (b) `autovacuum` tidak cukup agresif untuk volume perubahan tabel ini (parameter default yang tidak disesuaikan untuk tabel dengan `DELETE`/`UPDATE` sangat sering), butuh tuning parameter autovacuum khusus untuk tabel ini, bukan mengandalkan setting default untuk seluruh database. Satu kemungkinan lagi yang sering disalahpahami: `VACUUM` biasa menandai ruang dead tuple sebagai bisa dipakai ulang, tapi **tidak** mengecilkan file tabel di disk. Tabel yang pernah membengkak akan tetap besar secara fisik meski isinya sudah dibersihkan. Mengembalikan ruang ke sistem operasi butuh `VACUUM FULL` (mengunci tabel sepanjang proses) atau tool seperti `pg_repack`. Periksa juga replication slot yang terbengkalai atau replica dengan `hot_standby_feedback`, karena keduanya bisa menahan pembersihan dengan cara yang sama seperti transaction panjang.
 
 ## Self-Check
 

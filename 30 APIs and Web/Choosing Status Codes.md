@@ -41,7 +41,7 @@ Kode yang paling sering dibutuhkan sehari-hari, dan kapan masing-masing tepat:
 - **`404 Not Found`** — resource tidak ditemukan.
 - **`409 Conflict`** — request bertentangan dengan state resource saat ini (misalnya percobaan membuat resource yang sudah ada, atau conflict edit konkuren).
 - **`422 Unprocessable Entity`** — sintaks valid, tapi data secara semantik tidak valid (misalnya NIK format benar tapi checksum-nya salah).
-- **`429 Too Many Requests`** — client melampaui rate limit — **satu-satunya** kode di kelas `4xx` yang umumnya tetap dianggap layak diretry, dengan jeda (lihat [[Rate Limiting Algorithms]]).
+- **`429 Too Many Requests`** — client melampaui rate limit — kode `4xx` yang paling umum dianggap layak diretry, dengan jeda (lihat [[Rate Limiting Algorithms]]). `408 Request Timeout` juga termasuk kelompok ini. Pengecualian lain harus dinyatakan eksplisit di kontrak API, misalnya `409` untuk idempotency key yang masih diproses (lihat [[Idempotency]]).
 - **`500 Internal Server Error`** — kegagalan server yang tidak terduga.
 - **`503 Service Unavailable`** — server sedang tidak sanggup melayani (overload, maintenance) — biasanya layak diretry setelah jeda.
 
@@ -113,7 +113,7 @@ Presisi ekstra dalam memilih status code (membedakan `400` dari `422`, `401` dar
 4. Desain terbuka: sebuah endpoint permohonan dokumen legal perlu menangani kasus di mana permohonan dengan NIK yang sama sudah pernah diajukan dan masih dalam proses. Rancang status code yang tepat untuk kasus ini, dan pertimbangkan apakah ini `409 Conflict`, `422 Unprocessable Entity`, atau kode lain — jelaskan alasan pilihanmu dan bagaimana ini memengaruhi cara client (termasuk partner) menangani responsnya.
 
 > [!success]- Kunci jawaban
-> `409 Conflict` adalah pilihan paling tepat: request secara sintaks dan semantik valid (NIK-nya benar, formatnya benar — jadi bukan `400`/`422`), tapi bertentangan dengan **state saat ini** dari sistem (sudah ada permohonan aktif dengan NIK yang sama) — persis definisi `409`. Sertakan di body response referensi ke permohonan yang sedang berjalan (misalnya ID-nya) supaya client bisa mengarahkan user untuk memeriksa status permohonan yang sudah ada, bukan sekadar menampilkan pesan error generik. Client (termasuk partner) yang menerima `409` seharusnya tidak melakukan retry otomatis dengan payload yang sama — sinyal `409` memberitahu bahwa masalahnya ada di state, bukan di request itu sendiri, sehingga tindakan yang tepat adalah menampilkan informasi itu ke user, bukan mencoba lagi.
+> `409 Conflict` adalah pilihan paling tepat: request secara sintaks dan semantik valid (NIK-nya benar, formatnya benar — jadi bukan `400`/`422`), tapi bertentangan dengan **state saat ini** dari sistem (sudah ada permohonan aktif dengan NIK yang sama) — persis definisi `409`. Sertakan di body response referensi ke permohonan yang sedang berjalan (misalnya ID-nya) supaya client bisa mengarahkan user untuk memeriksa status permohonan yang sudah ada, bukan sekadar menampilkan pesan error generik. Client (termasuk partner) yang menerima `409` jenis ini seharusnya tidak melakukan retry otomatis dengan payload yang sama — sinyal `409` memberitahu bahwa masalahnya ada di state, bukan di request itu sendiri, sehingga tindakan yang tepat adalah menampilkan informasi itu ke user, bukan mencoba lagi. Karena `409` juga dipakai untuk kasus yang justru boleh dicoba lagi (idempotency key yang masih diproses, lihat [[Idempotency]]), bedakan keduanya lewat kode error di body response.
 
 ## Self-Check
 

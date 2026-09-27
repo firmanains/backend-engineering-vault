@@ -18,7 +18,7 @@ Goroutine sering diperkenalkan sebagai "lightweight thread" — deskripsi yang m
 
 ## The Problem
 
-Sebuah endpoint yang memproses upload dokumen meluncurkan satu goroutine terpisah untuk setiap tugas pemrosesan (validasi format, scan virus, generate thumbnail, kirim notifikasi) dengan asumsi "goroutine murah, jadi aman diluncurkan sebanyak apa pun". Di bawah beban ringan, ini bekerja baik-baik saja. Begitu traffic upload meningkat drastis (ribuan upload bersamaan di jam sibuk), aplikasi mulai melambat drastis dan akhirnya kehabisan memori. Bukan karena goroutine itu sendiri "mahal" secara individual, tapi karena **jumlahnya tidak dibatasi**: setiap upload meluncurkan empat goroutine baru tanpa batas atas, dan ribuan upload bersamaan berarti puluhan ribu goroutine hidup sekaligus, masing-masing memakai stack memori dan menambah beban penjadwalan runtime.
+Sebuah endpoint yang memproses upload dokumen meluncurkan satu goroutine terpisah untuk setiap tugas pemrosesan (validasi format, scan virus, generate thumbnail, kirim notifikasi) dengan asumsi "goroutine murah, jadi aman diluncurkan sebanyak apa pun". Di bawah beban ringan, ini bekerja baik-baik saja. Begitu traffic upload meningkat drastis (ribuan upload bersamaan di jam sibuk), aplikasi mulai melambat drastis dan akhirnya kehabisan memori. Stack goroutine-nya sendiri bukan penyebab utama: puluhan ribu goroutine kosong hanya memakan puluhan sampai ratusan megabyte. Masalahnya ada pada **apa yang dipegang dan dikerjakan** setiap goroutine, tanpa batas jumlah. Setiap goroutine memegang isi dokumen di memori, scan virus dan pembuatan thumbnail berebut CPU yang sama, dan layanan notifikasi di hilir dibanjiri request serentak. Goroutine membuat semua pekerjaan itu mudah diluncurkan, tapi tidak membuat pekerjaannya menjadi lebih ringan.
 
 Masalah kedua yang lebih halus: sebuah goroutine diluncurkan untuk memanggil API partner eksternal, tapi kode pemanggil tidak pernah menunggu goroutine itu selesai (`go panggilPartner()` lalu handler langsung mengembalikan response, tanpa `WaitGroup` atau mekanisme sinkronisasi apa pun). Kalau `panggilPartner()` panic karena alasan yang tidak terduga (misalnya response API partner yang tidak sesuai ekspektasi), panic itu **tidak akan tertangkap** oleh mekanisme recover di goroutine utama, karena panic di satu goroutine tidak menyebar ke goroutine lain. Kalau tidak ditangani dengan `recover()` di dalam goroutine itu sendiri, ia langsung menjatuhkan **seluruh proses aplikasi**, bukan hanya goroutine yang bermasalah.
 
@@ -78,7 +78,7 @@ Diagram ini menunjukkan lapisan indirection inti: goroutine tidak berbicara lang
 
 ## Under The Hood
 
-Program Go yang sebuah goroutine di dalamnya `panic()` tanpa `recover()` akan menjatuhkan **seluruh proses**, bukan hanya goroutine itu — ini beda mendasar dari model beberapa bahasa/runtime lain yang mengisolasi kegagalan per-thread. Konsekuensinya: setiap goroutine yang diluncurkan dengan `go func() {...}()` dan berpotensi panic (memanggil kode yang bisa gagal tak terduga, seperti parsing data eksternal) idealnya membungkus dirinya sendiri dengan `defer func() { recover() }()` di baris pertamanya sendiri. Menunggu goroutine lain "menangkap" panic-nya tidak mungkin dilakukan, karena `recover()` hanya bekerja dalam goroutine yang sama tempat panic terjadi.
+Program Go yang sebuah goroutine di dalamnya `panic()` tanpa `recover()` akan menjatuhkan **seluruh proses**, bukan hanya goroutine itu — ini beda mendasar dari model beberapa bahasa/runtime lain yang mengisolasi kegagalan per-thread. Konsekuensinya: setiap goroutine yang diluncurkan dengan `go func() {...}()` dan berpotensi panic (memanggil kode yang bisa gagal tak terduga, seperti parsing data eksternal) idealnya memasang `defer` berisi `recover()` di baris pertamanya sendiri, yang **mencatat** panic itu (lengkap dengan stack trace) alih-alih menelannya diam-diam. Menunggu goroutine lain "menangkap" panic-nya tidak mungkin dilakukan, karena `recover()` hanya bekerja dalam goroutine yang sama tempat panic terjadi. Recover di batas goroutine masuk akal untuk tugas yang independen (satu upload gagal tidak boleh menjatuhkan semua upload lain). Tapi panic tetap tanda bug, dan state yang sedang diubah saat panic terjadi bisa tertinggal setengah jadi.
 
 `main()` yang selesai (return) akan **langsung menghentikan seluruh program**, termasuk goroutine lain yang masih berjalan — tidak ada "menunggu goroutine lain selesai" secara otomatis. Ini kenapa `sync.WaitGroup` (atau mekanisme sinkronisasi lain, dibahas di [[The Sync Package]]) wajib dipakai kalau `main()` (atau handler HTTP, atau fungsi mana pun) perlu memastikan goroutine yang diluncurkannya benar-benar selesai sebelum melanjutkan atau mengembalikan response.
 
@@ -91,37 +91,53 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
+	"sync"
 )
 
-// Sebelumnya (BERMASALAH): meluncurkan goroutine tanpa batas dan tanpa
-// penanganan panic — persis skenario "The Problem".
-func prosesUploadNaif(ctx context.Context, dokumenID int64) {
+// SALAH: meluncurkan goroutine tanpa batas dan tanpa penanganan panic,
+// persis skenario The Problem.
+func prosesUploadNaif(dokumenID int64) {
 	go validasiFormat(dokumenID)
 	go scanVirus(dokumenID)
 	go generateThumbnail(dokumenID)
 	go kirimNotifikasi(dokumenID)
-	// TIDAK ADA batas jumlah goroutine konkuren, TIDAK ADA penanganan
-	// panic per goroutine, TIDAK ADA cara tahu kapan semuanya selesai.
+	// Tidak ada batas jumlah goroutine, tidak ada penanganan panic,
+	// dan tidak ada cara tahu kapan semuanya selesai.
 }
 
-// Versi yang lebih aman: setiap goroutine membungkus dirinya dengan
-// recover, dan pemanggil bisa menunggu semuanya selesai lewat WaitGroup
-// (pola lengkap dengan pembatasan jumlah konkuren dibahas di Worker Pools).
-func jalankanDenganAman(nama string, tugas func(), logger *slog.Logger) {
+// jalankanDenganAman meluncurkan satu tugas di goroutine sendiri yang
+// memulihkan panic-nya sendiri, lalu memberi tahu WaitGroup saat selesai.
+func jalankanDenganAman(wg *sync.WaitGroup, nama string, tugas func(), logger *slog.Logger) {
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Error("goroutine panic, di-recover",
-					"tugas", nama, "panic", r)
+					"tugas", nama, "panic", r, "stack", string(debug.Stack()))
 			}
 		}()
 		tugas()
 	}()
 }
 
-func prosesUploadLebihAman(ctx context.Context, dokumenID int64, logger *slog.Logger) {
-	jalankanDenganAman("validasi-format", func() { validasiFormat(dokumenID) }, logger)
-	jalankanDenganAman("scan-virus", func() { scanVirus(dokumenID) }, logger)
+// prosesUploadLebihAman menjalankan tugas-tugas secara paralel, memulihkan
+// panic per tugas, dan menunggu semuanya selesai sebelum kembali. Batas
+// jumlah upload yang diproses bersamaan tetap perlu diatur di level
+// pemanggil (lihat Worker Pools).
+func prosesUploadLebihAman(ctx context.Context, dokumenID int64, logger *slog.Logger) error {
+	var wg sync.WaitGroup
+	jalankanDenganAman(&wg, "validasi-format", func() { validasiFormat(dokumenID) }, logger)
+	jalankanDenganAman(&wg, "scan-virus", func() { scanVirus(dokumenID) }, logger)
+	jalankanDenganAman(&wg, "thumbnail", func() { generateThumbnail(dokumenID) }, logger)
+	wg.Wait()
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("proses upload %d dibatalkan: %w", dokumenID, err)
+	}
+	kirimNotifikasi(dokumenID)
+	return nil
 }
 
 func validasiFormat(id int64)    { fmt.Println("validasi", id) }
@@ -129,6 +145,8 @@ func scanVirus(id int64)         { fmt.Println("scan virus", id) }
 func generateThumbnail(id int64) { fmt.Println("thumbnail", id) }
 func kirimNotifikasi(id int64)   { fmt.Println("notifikasi", id) }
 ```
+
+Satu jebakan terkait yang sering muncul di handler HTTP: kalau pekerjaan latar belakang harus tetap berjalan setelah handler mengembalikan response, jangan meneruskan `r.Context()` ke goroutine itu. Context request dibatalkan begitu handler selesai, sehingga pekerjaan latar belakang ikut berhenti di tengah jalan. Pakai `context.WithoutCancel(r.Context())` (Go 1.21+) kalau nilai-nilai di context (misalnya correlation ID) masih dibutuhkan, dan pasang timeout sendiri untuk pekerjaan itu.
 
 ## In His Stack
 

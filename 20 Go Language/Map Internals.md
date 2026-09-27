@@ -35,18 +35,13 @@ Analogi "membanting pintu" ini bocor pada soal seberapa bisa diandalkannya detek
 
 ## How It Works
 
-Map Go diimplementasikan sebagai hash table yang datanya disimpan dalam struktur bucket internal. Variable map yang kamu tulis di kode (`m := map[string]int{}`) adalah pointer ke struktur internal ini — meng-copy variable map ke variable lain, atau mengopernya ke function, hanya menyalin pointer itu, **bukan** seluruh isi hash table-nya. Ini artinya dua variable map bisa jadi "dua nama untuk hash table yang sama persis" — beda dengan slice, yang membawa header tiga-field sebagai value (lihat [[Slice Internals]]).
-
-> [!question] Perlu diverifikasi
-> Klaim: struktur internal map Go berupa "bucket".
-> Kenapa ragu: implementasi map Go pernah diganti secara mendasar di rilis yang relatif baru, dan istilah internalnya ikut berubah. Perilaku yang terlihat dari luar (urutan iterasi diacak, tidak aman diakses konkuren) tidak berubah, tapi deskripsi internalnya bisa sudah usang.
-> Cara verifikasi: release notes Go untuk versi yang dipakai, dan komentar di source `runtime/map*.go`.
+Map Go diimplementasikan sebagai hash table. Sejak Go 1.24, implementasinya memakai desain *Swiss Table* (entri dikelompokkan dalam *group* dengan *control word* untuk pencarian cepat), menggantikan desain bucket lama yang banyak dijelaskan di artikel dan buku yang lebih tua. Detail internal ini tidak mengubah perilaku yang terlihat dari luar. Variable map yang kamu tulis di kode (`m := map[string]int{}`) adalah pointer ke struktur internal ini — meng-copy variable map ke variable lain, atau mengopernya ke function, hanya menyalin pointer itu, **bukan** seluruh isi hash table-nya. Ini artinya dua variable map bisa jadi "dua nama untuk hash table yang sama persis" — beda dengan slice, yang membawa header tiga-field sebagai value (lihat [[Slice Internals]]).
 
 Zero value map adalah `nil`. Map `nil` **aman dibaca** (mengembalikan zero value tipe hasilnya kalau key tidak ditemukan) tapi **panic kalau ditulis** — perbedaan yang sering mengejutkan pemula yang lupa memakai `make()` sebelum menulis ke map.
 
 ```mermaid
 flowchart LR
-    V1["variable m1"] --> H[("Hash table internal\n(buckets)")]
+    V1["variable m1"] --> H[("Hash table internal")]
     V2["variable m2 (m2 := m1)"] --> H
     G1["Goroutine A: menulis"] -.-> H
     G2["Goroutine B: menulis bersamaan"] -.-> H
@@ -58,12 +53,15 @@ flowchart LR
 Bug nil map, dan perbaikan cache konkuren dari "The Problem":
 
 ```go
-// Panic: menulis ke map nil.
-var m map[string]int
-// m["a"] = 1 // panic: assignment to entry in nil map
+func contohNilMap() {
+    // Panic: menulis ke map nil.
+    var m map[string]int
+    _ = m["a"] // membaca map nil aman: menghasilkan 0
+    // m["a"] = 1 // panic: assignment to entry in nil map
 
-m2 := make(map[string]int) // sekarang aman ditulis
-m2["a"] = 1
+    m2 := make(map[string]int) // sekarang aman ditulis
+    m2["a"] = 1
+}
 
 // SALAH: map biasa dibagikan ke banyak goroutine tanpa sinkronisasi —
 // berpotensi fatal error di production saat traffic konkuren tinggi.

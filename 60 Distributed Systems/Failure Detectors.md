@@ -14,7 +14,7 @@ created: 2026-08-02
 
 ## TL;DR
 
-Dalam sistem terdistribusi, satu node tidak pernah bisa **benar-benar yakin** node lain sudah mati — ia hanya bisa mengamati bahwa node itu berhenti merespons, dan "berhenti merespons" punya banyak kemungkinan penyebab: node itu benar-benar mati, node itu hidup tapi jaringan di antaranya terputus, atau node itu hidup dan jaringan baik-baik saja tapi sedang terlalu sibuk untuk merespons tepat waktu. Failure detector adalah mekanisme yang membuat **tebakan berdasar** tentang status node lain — dan secara teoretis (dibuktikan oleh hasil FLP impossibility), tidak ada failure detector yang bisa 100% akurat dan 100% cepat sekaligus dalam sistem asinkron murni. Failure detector praktis selalu memilih titik keseimbangan antara kecepatan deteksi dan risiko salah menganggap node hidup sebagai mati (atau sebaliknya).
+Dalam sistem terdistribusi, satu node tidak pernah bisa **benar-benar yakin** node lain sudah mati — ia hanya bisa mengamati bahwa node itu berhenti merespons, dan "berhenti merespons" punya banyak kemungkinan penyebab: node itu benar-benar mati, node itu hidup tapi jaringan di antaranya terputus, atau node itu hidup dan jaringan baik-baik saja tapi sedang terlalu sibuk untuk merespons tepat waktu. Failure detector adalah mekanisme yang membuat **tebakan berdasar** tentang status node lain. Dalam sistem asinkron murni (tanpa batas atas waktu tempuh pesan), failure detector yang sempurna mustahil dibuat, karena node yang sangat lambat dan node yang mati tidak bisa dibedakan hanya dari ketiadaan respons. Failure detector praktis selalu memilih titik keseimbangan antara kecepatan deteksi dan risiko salah menganggap node hidup sebagai mati (atau sebaliknya).
 
 ## The Problem
 
@@ -46,9 +46,9 @@ Ada dua pendekatan dasar: **heartbeat** (node yang dipantau aktif mengirim sinya
 
 ## Under The Hood
 
-Hasil teoretis penting yang mendasari batasan ini adalah **FLP impossibility** (dibuktikan Fischer, Lynch, dan Paterson pada 1985): dalam sistem asinkron murni (di mana tidak ada batas atas pasti untuk waktu tempuh pesan), **tidak mungkin** ada algoritma consensus yang menjamin selalu benar **dan** selalu berakhir (terminating) dalam waktu terbatas, sekalipun hanya satu node yang mungkin gagal. Implikasinya untuk failure detector: dalam sistem asinkron murni, secara matematis tidak mungkin membedakan "node yang sangat lambat" dari "node yang mati" dengan akurasi sempurna — satu-satunya jalan keluar adalah menambahkan asumsi tambahan (batas waktu maksimum yang "cukup masuk akal" meski tidak dijamin, seperti kebanyakan sistem praktis lakukan) yang mengorbankan jaminan matematis sempurna demi kepraktisan.
+Dua hasil teoretis membingkai topik ini, dan keduanya sering tercampur. **FLP impossibility** (Fischer, Lynch, dan Paterson, 1985) adalah hasil tentang **consensus**, bukan tentang failure detector: dalam sistem asinkron murni, tidak ada algoritma consensus deterministik yang dijamin selalu benar **dan** selalu selesai, bahkan kalau hanya satu node yang mungkin crash. Akar masalahnya persis ketidakmampuan membedakan node lambat dari node mati. Hasil kedua datang dari Chandra dan Toueg (1996): mereka menunjukkan bahwa consensus **menjadi mungkin** kalau sistem dilengkapi failure detector yang tidak sempurna, asalkan detector itu *akhirnya* berhenti mencurigai setidaknya satu node yang benar-benar hidup. Inilah kenapa sistem praktis seperti Raft memakai timeout: timeout adalah failure detector yang boleh salah sementara, dan keamanan algoritmanya dirancang supaya kesalahan sementara itu tidak merusak data, hanya menunda kemajuan.
 
-Failure detector diklasifikasikan berdasarkan dua properti: **completeness** (seberapa yakin node yang benar-benar mati akhirnya terdeteksi) dan **accuracy** (seberapa yakin node yang terdeteksi mati memang benar-benar mati, bukan false positive). Sistem praktis hampir selalu memilih **eventually accurate** — boleh salah sesaat (seperti "The Problem"), tapi pada akhirnya akan benar setelah cukup waktu berlalu — karena mengejar akurasi sempurna seketika terbukti mustahil oleh FLP impossibility.
+Failure detector diklasifikasikan berdasarkan dua properti: **completeness** (seberapa yakin node yang benar-benar mati akhirnya terdeteksi) dan **accuracy** (seberapa yakin node yang terdeteksi mati memang benar-benar mati, bukan false positive). Sistem praktis hampir selalu memilih **eventually accurate**: boleh salah sesaat (seperti "The Problem"), tapi pada akhirnya akan benar setelah cukup waktu berlalu. Akurasi sempurna seketika mustahil di jaringan yang delay-nya tidak terbatas, jadi yang bisa dirancang adalah konsekuensi kesalahannya, bukan menghilangkan kesalahannya.
 
 ## In Go
 
@@ -60,9 +60,9 @@ import (
 	"time"
 )
 
-// Status memberi ruang untuk "belum pasti" — TIDAK langsung
-// biner hidup/mati, mengurangi risiko keputusan drastis dari
-// kegagalan respons sesaat seperti GC pause.
+// Status memberi ruang untuk "belum pasti", tidak langsung biner
+// hidup/mati, sehingga kegagalan respons sesaat (misalnya GC pause) tidak
+// langsung memicu keputusan drastis.
 type Status int
 
 const (
@@ -71,31 +71,43 @@ const (
 	Dead
 )
 
-type PhiAccrual struct {
+// DetektorAmbang adalah failure detector berbasis ambang waktu tetap.
+// Ini bukan phi accrual (lihat penjelasan di bawah): ambangnya tidak
+// menyesuaikan diri dengan pola heartbeat yang teramati.
+type DetektorAmbang struct {
 	mu            sync.Mutex
 	lastHeartbeat time.Time
 	suspectAfter  time.Duration
 	deadAfter     time.Duration
 }
 
-func (p *PhiAccrual) RecordHeartbeat() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.lastHeartbeat = time.Now()
+func NewDetektorAmbang(suspectAfter, deadAfter time.Duration) *DetektorAmbang {
+	// Waktu mulai dianggap heartbeat pertama, supaya node baru tidak
+	// langsung dianggap mati sebelum sempat mengirim apa pun.
+	return &DetektorAmbang{
+		lastHeartbeat: time.Now(),
+		suspectAfter:  suspectAfter,
+		deadAfter:     deadAfter,
+	}
 }
 
-// CurrentStatus TIDAK langsung menyimpulkan "mati" dari SATU
-// heartbeat yang terlewat — ada jendela "suspected" yang memberi
-// kesempatan node yang hanya lambat sesaat untuk pulih.
-func (p *PhiAccrual) CurrentStatus() Status {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (d *DetektorAmbang) RecordHeartbeat() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lastHeartbeat = time.Now()
+}
 
-	elapsed := time.Since(p.lastHeartbeat)
+// CurrentStatus tidak menyimpulkan "mati" dari satu heartbeat yang
+// terlewat: ada jendela Suspected yang memberi node lambat kesempatan pulih.
+func (d *DetektorAmbang) CurrentStatus() Status {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	elapsed := time.Since(d.lastHeartbeat)
 	switch {
-	case elapsed < p.suspectAfter:
+	case elapsed < d.suspectAfter:
 		return Alive
-	case elapsed < p.deadAfter:
+	case elapsed < d.deadAfter:
 		return Suspected
 	default:
 		return Dead
@@ -103,9 +115,11 @@ func (p *PhiAccrual) CurrentStatus() Status {
 }
 ```
 
+Ambang tetap seperti di atas punya kelemahan: angka yang cocok untuk jaringan tenang terlalu ketat saat jaringan sedang bergejolak, dan sebaliknya. **Phi accrual failure detector** (dipakai antara lain oleh Cassandra dan Akka) menyelesaikannya dengan cara berbeda. Ia merekam jarak waktu antar heartbeat, membentuk distribusi statistiknya, lalu mengeluarkan angka kecurigaan φ yang terus naik selama heartbeat berikutnya belum datang. φ tinggi berarti "berdasarkan pola selama ini, keterlambatan sepanjang ini sangat tidak wajar". Aplikasi yang memakai detector itu memilih sendiri ambang φ untuk tindakannya, dan ambang itu otomatis menyesuaikan dengan kondisi jaringan yang teramati.
+
 ## In His Stack
 
-Untuk service yang berjalan di Kubernetes, liveness dan readiness probe (lihat [[../70 Infrastructure and Delivery/Kubernetes Config, Secrets, Probes, and Autoscaling|Kubernetes Config, Secrets, Probes, and Autoscaling]]) sebenarnya adalah implementasi failure detector sederhana — dan keterbatasan yang sama berlaku: Pod yang lambat merespons karena beban tinggi bisa salah terdeteksi "tidak sehat" dan di-restart, padahal ia sebenarnya hanya butuh waktu lebih lama, bukan benar-benar rusak. Memahami trade-off failure detector membantu mengatur threshold probe (`failureThreshold`, `periodSeconds`) dengan lebih sadar, bukan sekadar nilai default yang mungkin terlalu sensitif atau terlalu longgar untuk karakteristik beban aplikasi tertentu.
+Untuk service yang berjalan di Kubernetes, liveness dan readiness probe (lihat [[../70 Infrastructure and Delivery/Kubernetes Config, Secrets, Probes, and Autoscaling|Kubernetes Config, Secrets, Probes, and Autoscaling]]) sebenarnya adalah implementasi failure detector sederhana — dan keterbatasan yang sama berlaku: Pod yang lambat merespons karena beban tinggi bisa salah terdeteksi "tidak sehat" dan di-restart, padahal ia sebenarnya hanya butuh waktu lebih lama, bukan benar-benar rusak. Bedanya penting: liveness probe yang gagal membuat container di-restart, sedangkan readiness probe yang gagal hanya mengeluarkan Pod dari daftar endpoint Service. Liveness probe yang terlalu sensitif (misalnya memeriksa database, sehingga gagal saat database lambat) bisa membuat semua Pod di-restart bersamaan tepat saat sistem sedang tertekan. Memahami trade-off failure detector membantu mengatur threshold probe (`failureThreshold`, `periodSeconds`) dengan lebih sadar, bukan sekadar nilai default yang mungkin terlalu sensitif atau terlalu longgar untuk karakteristik beban aplikasi tertentu.
 
 ## Trade-offs and When Not To Use It
 
@@ -125,7 +139,7 @@ Failure detector yang sangat cepat mendeteksi kegagalan (threshold pendek) beris
 ## Exercises
 
 1. Jelaskan kenapa satu node tidak pernah bisa benar-benar yakin node lain sudah mati, hanya bisa membuat tebakan berdasar.
-2. Apa itu FLP impossibility, dan implikasinya untuk desain failure detector praktis?
+2. Apa itu FLP impossibility, apa hubungannya dengan failure detector, dan apa yang ditunjukkan Chandra–Toueg setelahnya?
 3. Kenapa status "suspected" (bukan langsung "dead") mengurangi risiko konsekuensi dari false positive?
 4. Desain terbuka: kamu mengelola cluster tiga node untuk salah satu dari 13 aplikasi, dan pernah mengalami insiden split brain akibat satu node yang salah terdeteksi mati karena lonjakan CPU sesaat (bukan benar-benar mati). Rancang perbaikan failure detector untuk cluster ini yang mengurangi risiko kejadian serupa, dengan mempertimbangkan trade-off kecepatan deteksi vs akurasi.
 
@@ -152,6 +166,7 @@ Failure detector yang sangat cepat mendeteksi kegagalan (threshold pendek) beris
 
 - Michael J. Fischer, Nancy A. Lynch, Michael S. Paterson, "Impossibility of Distributed Consensus with One Faulty Process" (1985) — paper asli FLP impossibility, salah satu hasil teoretis paling fundamental di distributed systems, sangat relevan untuk ambisi studi master.
 - Naohiro Hayashibara dkk., "The φ Accrual Failure Detector" (2004) — pendekatan failure detector probabilistik yang lebih canggih dari threshold tetap sederhana.
+- Tushar Deepak Chandra dan Sam Toueg, "Unreliable Failure Detectors for Reliable Distributed Systems" (Journal of the ACM, 1996) — paper yang menunjukkan consensus bisa diselesaikan dengan failure detector yang tidak sempurna.
 
 ## Catatan Saya
 

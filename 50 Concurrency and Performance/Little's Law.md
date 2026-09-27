@@ -18,7 +18,7 @@ created: 2026-07-29
 
 ## The Problem
 
-Sebuah tim ingin menentukan berapa banyak instance server yang dibutuhkan untuk menangani proyeksi traffic baru, tapi melakukannya dengan menebak angka berdasarkan "perasaan" — menambah server sampai terasa cukup, tanpa kerangka matematis yang menghubungkan traffic (request per detik), waktu proses per request, dan jumlah request yang bisa ditangani **bersamaan** oleh kapasitas yang ada. Pendekatan tebak-tebakan ini sering menghasilkan either over-provisioning (biaya infrastruktur berlebihan untuk kapasitas yang tidak pernah benar-benar dipakai) atau under-provisioning (sistem kewalahan begitu traffic proyeksi benar-benar terjadi) — keduanya bisa dihindari dengan perhitungan yang tepat berdasarkan Little's Law, bukan tebakan.
+Sebuah tim ingin menentukan berapa banyak instance server yang dibutuhkan untuk menangani proyeksi traffic baru, tapi melakukannya dengan menebak angka berdasarkan "perasaan" — menambah server sampai terasa cukup, tanpa kerangka matematis yang menghubungkan traffic (request per detik), waktu proses per request, dan jumlah request yang bisa ditangani **bersamaan** oleh kapasitas yang ada. Pendekatan tebak-tebakan ini sering berakhir di salah satu dari dua kesalahan: over-provisioning (biaya infrastruktur berlebihan untuk kapasitas yang tidak pernah benar-benar dipakai) atau under-provisioning (sistem kewalahan begitu traffic proyeksi benar-benar terjadi) — keduanya bisa dihindari dengan perhitungan yang tepat berdasarkan Little's Law, bukan tebakan.
 
 Masalah kedua: sebuah tim menyadari p99 latency mereka melonjak drastis di jam sibuk, dan mencoba berbagai perbaikan ad-hoc (menambah index database, menaikkan connection pool) tanpa memahami hubungan matematis antara ketiga variabel (jumlah request bersamaan, laju kedatangan, waktu proses) yang sebenarnya menjelaskan kenapa lonjakan itu terjadi secara struktural, bukan sekadar "sistem lambat" secara umum.
 
@@ -45,7 +45,7 @@ flowchart LR
 
 ## Under The Hood
 
-Little's Law secara matematis **tidak bergantung** pada distribusi statistik laju kedatangan atau waktu layanan — ia berlaku untuk distribusi apa pun (Poisson, deterministik, atau pola lain), selama sistemnya dalam keadaan stabil (steady state) dalam jangka waktu pengukuran. Ini yang membuatnya sangat berguna sebagai alat estimasi cepat — tidak perlu model statistik rumit untuk memakainya, cukup dua angka yang relatif mudah diukur ($\lambda$ dan $W$) dari sistem yang sudah berjalan atau dari load testing.
+Little's Law bekerja dengan **rata-rata**: $L$ adalah rata-rata jumlah item di sistem, dan $W$ adalah rata-rata waktu di sistem, termasuk waktu mengantre. Hukum ini secara matematis **tidak bergantung** pada distribusi statistik laju kedatangan atau waktu layanan — ia berlaku untuk distribusi apa pun (Poisson, deterministik, atau pola lain), selama sistemnya dalam keadaan stabil (steady state) dalam jangka waktu pengukuran. Ini yang membuatnya sangat berguna sebagai alat estimasi cepat — tidak perlu model statistik rumit untuk memakainya, cukup dua angka yang relatif mudah diukur ($\lambda$ dan $W$) dari sistem yang sudah berjalan atau dari load testing.
 
 Hukum ini juga menjelaskan secara formal kenapa menambah **konkurensi** (lebih banyak goroutine, lebih banyak instance) adalah cara mengatasi $\lambda$ yang tinggi, sementara mengurangi **$W$** (mengoptimasi kode, query, atau infrastruktur agar lebih cepat) adalah cara lain mencapai $L$ yang sama dengan kapasitas lebih sedikit — dua strategi berbeda untuk masalah yang sama, dan Little's Law memberi kerangka untuk menghitung secara eksplisit trade-off antara keduanya alih-alih menebak mana yang "terasa" lebih baik.
 
@@ -114,7 +114,7 @@ Little's Law memberi estimasi **rata-rata** (steady state) — ia tidak secara l
 ## Connected Notes
 
 - [[../40 Databases/Tuning the Connection Pool|Tuning the Connection Pool]] — aplikasi konkret Little's Law yang sudah dibahas lebih dulu untuk menghitung ukuran connection pool database.
-- [[Latency Percentiles (p50, p95, p99)]] — $W$ dalam Little's Law idealnya diukur memakai persentil yang representatif, bukan sekadar rata-rata yang bisa menyesatkan.
+- [[Latency Percentiles (p50, p95, p99)]] — pelengkap, bukan pengganti: $W$ di dalam rumus harus **rata-rata** waktu di sistem (memasukkan p99 ke rumus membuat hasilnya salah secara matematis), sedangkan persentil dipakai untuk menentukan margin di atas angka rata-rata itu.
 - [[Worker Pools]] — jumlah worker yang tepat adalah salah satu keputusan kapasitas yang bisa dihitung langsung memakai Little's Law.
 - [[Load Testing]] — mengukur $\lambda$ dan $W$ secara akurat di bawah kondisi simulasi adalah salah satu tujuan utama load testing, dibahas di note berikutnya.
 - [[Capacity Planning]] — kelanjutan langsung: menggabungkan Little's Law dengan margin pengaman dan data historis untuk perencanaan kapasitas nyata, dibahas di note lain domain ini.

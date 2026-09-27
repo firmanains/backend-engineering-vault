@@ -44,7 +44,6 @@ func TestValidasiNIK(t *testing.T) {
     }
 
     for _, tc := range cases {
-        tc := tc // lihat catatan versi Go di bawah soal baris ini
         t.Run(tc.nama, func(t *testing.T) {
             err := ValidasiNIK(tc.input)
             if (err != nil) != tc.wantErr {
@@ -57,10 +56,9 @@ func TestValidasiNIK(t *testing.T) {
 
 `t.Run(tc.nama, ...)` membuat subtest bernama — kalau kasus "NIK terlalu pendek" gagal, output test akan menyebutnya persis, misalnya `--- FAIL: TestValidasiNIK/NIK_terlalu_pendek`, bukan sekadar "test gagal" tanpa konteks kasus mana yang bermasalah.
 
-> [!question] Perlu diverifikasi
-> Klaim: baris `tc := tc` di dalam loop dibutuhkan untuk menghindari bug capture variable loop **hanya** kalau subtest dijalankan paralel (`t.Parallel()`) pada Go versi sebelum 1.22; Go 1.22 mengubah semantik variable loop menjadi per-iterasi secara default.
-> Kenapa ragu: perilaku ini bergantung versi Go yang dipakai proyek — proyek yang di-pin ke versi lebih lama dari 1.22 tetap butuh baris `tc := tc` ini secara eksplisit untuk subtest paralel.
-> Cara verifikasi: periksa `go.mod` untuk versi Go yang dipakai proyek, dan baca release notes Go 1.22 soal perubahan semantik variable loop `for`.
+Subtest tanpa `t.Parallel()` dijalankan berurutan: `t.Run` baru kembali setelah subtest selesai. Karena itu contoh di atas aman di versi Go mana pun, tanpa perlu menyalin variable loop. Masalah capture baru muncul saat subtest dijalankan paralel, dibahas di bagian berikut.
+
+Aturan versinya: sejak Go 1.22, setiap iterasi `for` mendapat variable loop baru. Perubahan semantik ini ditentukan oleh baris `go` di `go.mod` module-mu, bukan oleh versi toolchain yang terpasang. Module dengan `go 1.21` atau lebih rendah tetap memakai semantik lama meski dikompilasi dengan Go terbaru.
 
 ## In Go
 
@@ -78,9 +76,10 @@ func TestValidasiNIKParalel(t *testing.T) {
     }
 
     for _, tc := range cases {
-        tc := tc // WAJIB di Go < 1.22 sebelum t.Parallel() di bawah;
-                 // tanpa ini, semua subtest paralel bisa memakai
-                 // data dari iterasi TERAKHIR saja.
+        tc := tc // Hanya dibutuhkan kalau go.mod menyatakan go < 1.22.
+                 // Tanpa ini, subtest paralel (yang baru benar-benar jalan
+                 // setelah loop selesai) bisa semuanya memakai data iterasi
+                 // TERAKHIR. Di go >= 1.22 baris ini tidak diperlukan.
         t.Run(tc.nama, func(t *testing.T) {
             t.Parallel()
             err := ValidasiNIK(tc.input)
@@ -138,7 +137,7 @@ Table-driven test paling pas untuk function dengan input-output yang jelas (pure
 
 ## Further Reading
 
-- Wiki resmi Go, halaman *"TableDrivenTests"* (github.com/golang/go/wiki/TableDrivenTests) — contoh dan konvensi resmi dari tim Go.
+- Wiki resmi Go, halaman *"TableDrivenTests"* (go.dev/wiki/TableDrivenTests) — contoh dan konvensi resmi dari tim Go.
 
 ## Catatan Saya
 

@@ -14,11 +14,11 @@ created: 2026-08-02
 
 ## TL;DR
 
-Paxos, diperkenalkan Leslie Lamport pada akhir 1980-an, adalah algoritma consensus pertama yang terbukti benar secara matematis dan dipakai luas — tapi terkenal luas juga karena kesulitannya dipahami, sampai-sampai paper aslinya sendiri ditulis dengan gaya naratif yang oleh sebagian pembaca justru dianggap menambah kebingungan, bukan menguranginya. Raft (dibahas di note sebelumnya) diciptakan khusus sebagai respons terhadap masalah ini: menyelesaikan masalah consensus yang **sama persis** dengan Paxos, tapi dengan struktur yang secara sengaja dirancang lebih mudah diajarkan dan diimplementasikan. Memahami Paxos tetap layak — bukan untuk diimplementasikan dari nol, tapi karena sebagian sistem penting di industri (termasuk sistem-sistem awal Google) dibangun di atasnya, dan karena memahami kesulitan Paxos membuat menghargai kenapa Raft dirancang seperti itu.
+Paxos, diperkenalkan Leslie Lamport pada akhir 1980-an (paper-nya baru terbit 1998), adalah salah satu algoritma consensus pertama yang terbukti benar secara matematis dan yang paling luas dipakai (Viewstamped Replication dari Oki dan Liskov, 1988, adalah protokol sezaman dengan gagasan serupa) — tapi terkenal luas juga karena kesulitannya dipahami, sampai-sampai paper aslinya sendiri ditulis dengan gaya naratif yang oleh sebagian pembaca justru dianggap menambah kebingungan, bukan menguranginya. Raft (dibahas di note sebelumnya) diciptakan khusus sebagai respons terhadap masalah ini: menyelesaikan masalah consensus yang **sama persis** dengan Paxos, tapi dengan struktur yang secara sengaja dirancang lebih mudah diajarkan dan diimplementasikan. Memahami Paxos tetap layak — bukan untuk diimplementasikan dari nol, tapi karena sebagian sistem penting di industri (termasuk sistem-sistem awal Google) dibangun di atasnya, dan karena memahami kesulitan Paxos membuat menghargai kenapa Raft dirancang seperti itu.
 
 ## The Problem
 
-Sebelum Paxos, memastikan sekumpulan node yang tidak saling percaya sepenuhnya sepakat pada satu nilai — meski sebagian node bisa gagal atau pesan bisa hilang — tidak punya solusi yang terbukti benar secara matematis. Solusi ad-hoc yang dicoba berbagai sistem sebelum consensus formal ada cenderung punya celah tersembunyi: skenario tertentu (kombinasi kegagalan node dan pesan yang hilang di waktu yang tepat) bisa membuat dua node berbeda menyimpulkan nilai yang berbeda sebagai "yang disepakati", persis masalah split brain yang dibahas di [[Leader Election and Split Brain]].
+Sebelum Paxos, memastikan sekumpulan node yang bisa crash atau lambat (tapi tidak berbohong) sepakat pada satu nilai — meski sebagian node bisa gagal atau pesan bisa hilang — tidak punya solusi yang terbukti benar secara matematis. Solusi ad-hoc yang dicoba berbagai sistem sebelum consensus formal ada cenderung punya celah tersembunyi: skenario tertentu (kombinasi kegagalan node dan pesan yang hilang di waktu yang tepat) bisa membuat dua node berbeda menyimpulkan nilai yang berbeda sebagai "yang disepakati", persis masalah split brain yang dibahas di [[Leader Election and Split Brain]].
 
 Paxos adalah jawaban formal pertama: sebuah protokol yang, lewat pembuktian matematis, menjamin **safety** (tidak akan pernah ada dua node yang menyimpulkan nilai berbeda sebagai keputusan final) bahkan dalam kondisi jaringan paling buruk sekalipun (pesan hilang, tertunda, atau tiba tidak berurutan) — selama mayoritas node pada akhirnya bisa saling berkomunikasi. Nilainya bukan sekadar "solusi yang bekerja", tapi solusi yang **terbukti** bekerja dalam setiap skenario kegagalan yang bisa dibayangkan dalam model formalnya.
 
@@ -49,7 +49,9 @@ sequenceDiagram
     A2-->>P: Accepted
     Note over P: Mayoritas Accepted → value RESMI DISEPAKATI
 ```
-Dua fase yang tidak bisa dilewati: **Prepare/Promise** (proposer memastikan tidak ada proposal dengan nomor lebih tinggi yang sudah berjalan, dan mengumpulkan informasi kalau ternyata ada nilai yang sudah pernah "hampir" disepakati sebelumnya), lalu **Accept/Accepted** (proposer benar-benar mengirim nilai yang diusulkan, dan itu resmi disepakati begitu mayoritas acceptor menerimanya — persis konsep quorum di [[Quorums]]).
+Dua fase yang tidak bisa dilewati. Di fase **Prepare/Promise**, acceptor yang menjawab berjanji tidak akan lagi menerima proposal bernomor lebih kecil dari `n`, dan melaporkan proposal bernomor tertinggi yang pernah ia terima beserta nilainya (kalau ada). Di fase **Accept/Accepted**, proposer mengirim nilai, dan nilai itu resmi disepakati begitu mayoritas acceptor menerimanya (persis konsep quorum di [[Quorums]]).
+
+Aturan paling penting ada di antara kedua fase itu, dan diagram di atas sengaja memakai kasus yang paling sederhana ("belum ada nilai diterima"). Kalau **salah satu saja** jawaban Promise melaporkan nilai yang sudah pernah diterima, proposer **wajib** mengusulkan nilai dari proposal bernomor tertinggi di antara laporan itu, bukan nilainya sendiri. Aturan inilah yang menjamin safety: kalau sebuah nilai mungkin sudah disepakati mayoritas, mayoritas yang menjawab Prepare berikutnya pasti beririsan dengan mayoritas itu, sehingga nilai tersebut pasti terbawa ke proposal baru.
 
 Peran dalam Paxos: **Proposer** mengusulkan nilai. **Acceptor** memutuskan menerima atau menolak proposal (mayoritas acceptor yang setuju membuat nilai itu resmi). **Learner** mempelajari nilai apa yang akhirnya disepakati. Satu node bisa memegang lebih dari satu peran sekaligus dalam implementasi praktis.
 
@@ -64,10 +66,8 @@ Ini persis yang dimaksud Diego Ongaro dan John Ousterhout (penulis paper Raft) s
 ```go
 package paxos
 
-// Proposal merepresentasikan nomor urut yang HARUS unik dan
-// terurut secara total di antara seluruh proposer — biasanya
-// kombinasi counter dan ID node, memastikan tidak ada dua proposer
-// yang kebetulan memakai nomor yang sama.
+// Proposal adalah nomor urut yang harus unik dan terurut total di antara
+// seluruh proposer: counter ditambah ID node sebagai pemecah seri.
 type Proposal struct {
 	Number int
 	NodeID string
@@ -77,36 +77,57 @@ func (p Proposal) GreaterThan(other Proposal) bool {
 	if p.Number != other.Number {
 		return p.Number > other.Number
 	}
-	return p.NodeID > other.NodeID // tie-break memakai NodeID
+	return p.NodeID > other.NodeID
+}
+
+// Accepted adalah proposal yang pernah diterima acceptor beserta nilainya.
+type Accepted struct {
+	Proposal Proposal
+	Value    string
 }
 
 type Acceptor struct {
-	PromisedProposal Proposal
-	AcceptedProposal *Proposal
-	AcceptedValue    string
+	Promised Proposal
+	Accepted *Accepted // nil kalau belum pernah menerima apa pun
 }
 
-// Prepare mengimplementasikan Fase 1 — acceptor HANYA berjanji
-// (promise) kalau proposal ini punya nomor lebih tinggi dari
-// SEMUA yang pernah dijanjikan sebelumnya.
-func (a *Acceptor) Prepare(p Proposal) (promised bool, priorValue *string, priorProposal *Proposal) {
-	if p.GreaterThan(a.PromisedProposal) {
-		a.PromisedProposal = p
-		return true, &a.AcceptedValue, a.AcceptedProposal
+// Prepare (fase 1): berjanji hanya kepada proposal yang lebih tinggi dari
+// semua janji sebelumnya, dan laporkan apa yang pernah diterima (bisa nil).
+func (a *Acceptor) Prepare(p Proposal) (promised bool, prior *Accepted) {
+	if !p.GreaterThan(a.Promised) {
+		return false, nil
 	}
-	return false, nil, nil
+	a.Promised = p
+	return true, a.Accepted
 }
 
-// Accept mengimplementasikan Fase 2 — acceptor HANYA menerima kalau
-// proposal ini masih yang tertinggi sejak Prepare terakhir.
+// Accept (fase 2): terima selama tidak ada janji kepada proposal yang lebih
+// tinggi sejak Prepare untuk proposal ini.
 func (a *Acceptor) Accept(p Proposal, value string) bool {
-	if !p.GreaterThan(a.PromisedProposal) && p != a.PromisedProposal {
+	if a.Promised.GreaterThan(p) {
 		return false
 	}
-	a.PromisedProposal = p
-	a.AcceptedProposal = &p
-	a.AcceptedValue = value
+	a.Promised = p
+	a.Accepted = &Accepted{Proposal: p, Value: value}
 	return true
+}
+
+// PilihNilai adalah aturan inti di sisi proposer, dijalankan setelah
+// menerima Promise dari mayoritas: kalau ada acceptor yang pernah menerima
+// nilai, proposer WAJIB memakai nilai dari proposal bernomor tertinggi.
+// Nilai usulannya sendiri hanya boleh dipakai kalau belum ada yang pernah
+// diterima sama sekali.
+func PilihNilai(laporan []*Accepted, usulanSendiri string) string {
+	var tertinggi *Accepted
+	for _, l := range laporan {
+		if l != nil && (tertinggi == nil || l.Proposal.GreaterThan(tertinggi.Proposal)) {
+			tertinggi = l
+		}
+	}
+	if tertinggi != nil {
+		return tertinggi.Value
+	}
+	return usulanSendiri
 }
 ```
 
@@ -124,7 +145,7 @@ Mengimplementasikan Paxos dari nol untuk kebutuhan praktis modern hampir tidak p
 > Mencoba mengimplementasikan Paxos dari nol untuk kebutuhan production tanpa keahlian mendalam di bidang ini — kerumitan detail (terutama multi-Paxos dan penanganan proposer bersaing) membuat implementasi yang terlihat benar tapi punya celah tersembunyi jadi risiko nyata, jauh lebih besar dibanding memakai Raft atau tool yang sudah teruji.
 
 > [!warning] Jebakan
-> Menganggap Paxos dan Raft menyelesaikan masalah yang berbeda — keduanya menyelesaikan masalah consensus yang **sama persis** (dibuktikan setara secara matematis), hanya berbeda dalam struktur dan kemudahan pemahaman/implementasi.
+> Menganggap Paxos dan Raft menyelesaikan masalah yang berbeda. Keduanya menyelesaikan masalah consensus yang sama, dan Raft dapat dipandang sebagai varian Multi-Paxos dengan leader yang kuat. Perbedaan utamanya ada pada cara leader dipilih (Raft hanya memilih candidate yang log-nya paling mutakhir) dan cara log dijaga, bukan pada masalah yang dipecahkan.
 
 > [!warning] Jebakan
 > Membaca paper asli Paxos ("The Part-Time Parliament") sebagai pengantar pertama tanpa latar belakang — paper ini terkenal ditulis dengan gaya alegoris yang oleh banyak pembaca justru dianggap menambah kebingungan; materi pengantar yang lebih modern biasanya jalan masuk yang lebih baik sebelum membaca paper asli.
@@ -137,7 +158,7 @@ Mengimplementasikan Paxos dari nol untuk kebutuhan praktis modern hampir tidak p
 4. Desain terbuka: seorang junior di timmu mengusulkan membangun sistem consensus kustom berbasis Paxos dari nol untuk kebutuhan koordinasi internal salah satu dari 13 aplikasi, karena "Paxos adalah algoritma consensus yang paling terbukti secara matematis". Bagaimana kamu akan merespons usulan ini, dan apa yang akan kamu rekomendasikan sebagai gantinya?
 
 > [!success]- Kunci jawaban
-> **1.** Fase Prepare/Promise: proposer memastikan tidak ada proposal dengan nomor lebih tinggi yang sudah berjalan, dan mengumpulkan informasi nilai yang mungkin sudah "hampir" disepakati sebelumnya — menjamin proposal baru tidak diam-diam menimpa keputusan yang sudah dalam proses. Fase Accept/Accepted: proposer mengirim nilai yang diusulkan, resmi disepakati begitu mayoritas acceptor menerimanya — menjamin safety (tidak ada dua nilai berbeda yang sama-sama dianggap final).
+> **1.** Fase Prepare/Promise: mayoritas acceptor berjanji menolak proposal bernomor lebih kecil, dan melaporkan nilai yang pernah mereka terima. Proposer wajib melanjutkan nilai dari laporan bernomor tertinggi (kalau ada), yang menjamin proposal baru tidak menimpa nilai yang mungkin sudah disepakati. Fase Accept/Accepted: proposer mengirim nilai yang diusulkan, resmi disepakati begitu mayoritas acceptor menerimanya — menjamin safety (tidak ada dua nilai berbeda yang sama-sama dianggap final).
 > **4.** Apresiasi ketertarikan pada teori consensus, tapi jelaskan bahwa terbukti benar secara matematis tidak sama dengan mudah diimplementasikan benar dalam praktik — Paxos dasar tidak mendefinisikan banyak detail praktis penting (leadership, replikasi log berurutan) yang justru paling rawan kesalahan implementasi, dan kesalahan di sistem consensus sering menghasilkan bug yang sangat sulit dideteksi (data yang diam-diam tidak konsisten, bukan crash yang jelas terlihat). Rekomendasi konkret: pakai tool yang sudah mengimplementasikan consensus dengan benar dan teruji luas di industri (Consul atau etcd, keduanya berbasis Raft) alih-alih membangun ulang dari nol — investasi tim jauh lebih baik dialokasikan ke integrasi dan operasional tool yang sudah matang, bukan ke implementasi algoritma consensus kustom yang risikonya jauh melebihi manfaatnya untuk kebutuhan koordinasi internal biasa.
 
 ## Self-Check
@@ -159,6 +180,7 @@ Mengimplementasikan Paxos dari nol untuk kebutuhan praktis modern hampir tidak p
 
 - Leslie Lamport, "The Part-Time Parliament" (1998) — paper asli Paxos, ditulis dengan gaya alegoris yang terkenal sulit; layak dibaca setelah memahami dasar-dasarnya lewat sumber lain.
 - Leslie Lamport, "Paxos Made Simple" (2001) — usaha Lamport sendiri menjelaskan ulang Paxos dengan lebih langsung, jalan masuk yang lebih baik sebelum paper asli.
+- Heidi Howard dan Richard Mortier, "Paxos vs Raft: Have we reached consensus on distributed consensus?" (PaPoC, 2020) — perbandingan langsung keduanya, menunjukkan betapa miripnya kedua algoritma di balik penyajian yang berbeda.
 
 ## Catatan Saya
 

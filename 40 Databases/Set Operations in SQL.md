@@ -66,7 +66,7 @@ WHERE NOT EXISTS (
 ## In Go
 
 ```go
-package main
+package audit
 
 import (
 	"context"
@@ -108,12 +108,7 @@ func AmbilPegawaiTanpaAksesGedung(ctx context.Context, db *sql.DB) ([]string, er
 
 ## In His Stack
 
-`INTERSECT` dan `EXCEPT` relatif baru didukung MariaDB dibanding fitur SQL dasar lainnya — sistem legacy yang belum dimutakhirkan mungkin belum punya akses ke keduanya, dan pola `JOIN`/`NOT EXISTS` yang setara (seperti dicontohkan di atas) tetap jadi cara paling portabel untuk skenario audit lintas sistem semacam ini, terutama kalau kamu berkoordinasi di antara 13+ aplikasi dengan versi database yang mungkin tidak seragam.
-
-> [!question] Perlu diverifikasi
-> Klaim: versi MariaDB pertama yang mendukung `INTERSECT` dan `EXCEPT`.
-> Kenapa ragu: fitur ini termasuk penambahan yang relatif baru di riwayat MariaDB dan nomor versi persisnya mudah salah diingat.
-> Cara verifikasi: changelog resmi MariaDB untuk fitur "INTERSECT" dan "EXCEPT", atau jalankan `SELECT VERSION();` lalu cek dokumentasi versi tersebut.
+`INTERSECT` dan `EXCEPT` baru didukung MariaDB sejak versi 10.3; varian `INTERSECT ALL`/`EXCEPT ALL` (yang mempertahankan duplikat) baru ada sejak 10.5. MySQL baru mendukung keduanya jauh belakangan, di seri 8.0. Sistem legacy yang belum dimutakhirkan mungkin belum punya akses ke keduanya, dan pola `JOIN`/`NOT EXISTS` yang setara (seperti dicontohkan di atas) tetap jadi cara paling portabel untuk skenario audit lintas sistem semacam ini, terutama kalau kamu berkoordinasi di antara 13+ aplikasi dengan versi database yang mungkin tidak seragam.
 
 ## Trade-offs and When Not To Use It
 
@@ -139,7 +134,7 @@ func AmbilPegawaiTanpaAksesGedung(ctx context.Context, db *sql.DB) ([]string, er
 
 > [!success]- Kunci jawaban
 > **1.** `SELECT DISTINCT h.nik FROM pegawai_hr h JOIN pegawai_akses_gedung a ON a.nik = h.nik`. `DISTINCT` dibutuhkan karena kalau salah satu sisi punya baris duplikat untuk `nik` yang sama (misalnya data akses gedung mencatat beberapa entri log per pegawai), `JOIN` akan menggandakan hasilnya, sementara `INTERSECT` standar secara definisi selalu mengembalikan himpunan hasil tanpa duplikat.
-> **4.** Rekonsiliasi dua arah paling aman ditulis sebagai dua query `EXCEPT` (atau `NOT EXISTS` yang setara, kalau `EXCEPT` tidak tersedia): satu untuk "transaksi internal yang tidak ada di konfirmasi bank" (`SELECT id_transaksi FROM transaksi_internal EXCEPT SELECT id_transaksi FROM konfirmasi_bank`), satu lagi untuk arah sebaliknya. Sebelum operasi himpunan, kolom pembanding (`id_transaksi`) harus dipastikan `NOT NULL` di kedua sumber — kalau data konfirmasi bank punya kemungkinan baris dengan `id_transaksi` kosong/`NULL` karena parsing file yang gagal sebagian, baris itu perlu disaring lebih dulu (`WHERE id_transaksi IS NOT NULL`) sebelum masuk ke `EXCEPT`, supaya tidak mengacaukan interpretasi hasil rekonsiliasi (walau `EXCEPT` sendiri, tidak seperti `NOT IN`, tidak akan membuat seluruh hasil kosong hanya karena satu `NULL`).
+> **4.** Rekonsiliasi dua arah paling aman ditulis sebagai dua query `EXCEPT` (atau `NOT EXISTS` yang setara, kalau `EXCEPT` tidak tersedia): satu untuk "transaksi internal yang tidak ada di konfirmasi bank" (`SELECT id_transaksi FROM transaksi_internal EXCEPT SELECT id_transaksi FROM konfirmasi_bank`), satu lagi untuk arah sebaliknya. Sebelum operasi himpunan, kolom pembanding (`id_transaksi`) harus dipastikan `NOT NULL` di kedua sumber — kalau data konfirmasi bank punya kemungkinan baris dengan `id_transaksi` kosong/`NULL` karena parsing file yang gagal sebagian, baris itu perlu disaring lebih dulu (`WHERE id_transaksi IS NOT NULL`) sebelum masuk ke `EXCEPT`, supaya tidak mengacaukan interpretasi hasil rekonsiliasi (walau `EXCEPT` sendiri, tidak seperti `NOT IN`, tidak akan membuat seluruh hasil kosong hanya karena satu `NULL`). Rekonsiliasi transaksi biasanya juga perlu menemukan **selisih nilai**, bukan hanya ID yang hilang. Menyertakan `nominal` dan `tanggal` di kedua `SELECT` membuat `EXCEPT` juga menangkap transaksi yang ID-nya ada di kedua sisi tapi nominalnya berbeda. Agar perbandingan itu bermakna, normalisasikan dulu format data dari file bank (tipe `DECIMAL` yang sama, tanggal di zona waktu yang sama) sebelum dibandingkan. MariaDB tidak punya `FULL OUTER JOIN`, jadi versi `JOIN` dari laporan dua arah ini ditulis sebagai dua `LEFT JOIN ... WHERE ... IS NULL` yang digabung dengan `UNION ALL`.
 
 ## Self-Check
 

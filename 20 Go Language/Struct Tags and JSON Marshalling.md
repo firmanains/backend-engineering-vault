@@ -41,6 +41,8 @@ type StatusDokumen struct {
 
 `encoding/json` hanya memproses field yang **exported** (diawali huruf besar) — field yang diawali huruf kecil tidak pernah muncul di JSON output maupun input, terlepas dari tag apa pun yang ditempel padanya (karena reflection tidak bisa mengaksesnya dari luar package). Format tag `json:"nama,opsi"` mendukung beberapa opsi: nama key custom, `omitempty` (hilangkan kalau zero value), dan `-` (kecualikan sepenuhnya dari marshalling).
 
+Dua detail yang sering mengejutkan. Pertama, `omitempty` **tidak** menghilangkan struct yang bernilai zero, termasuk `time.Time{}`; field seperti itu tetap muncul sebagai `"0001-01-01T00:00:00Z"`. Kedua, sejak Go 1.24 ada opsi `omitzero` yang menghilangkan field kalau nilainya zero value tipe itu (atau kalau method `IsZero()` miliknya mengembalikan `true`), termasuk struct. Keduanya tetap mekanis: `omitzero` pada `bool` akan menghilangkan `false` persis seperti `omitempty`.
+
 ```mermaid
 flowchart LR
     Struct["struct StatusDokumen\nIsVerified bool = false"] --> Check{"omitempty aktif?\nNilai == zero value?"}
@@ -73,11 +75,17 @@ func main() {
         ID:         "A-001",
         IsVerified: boolPtr(false), // sengaja false, TETAP muncul di JSON
     }
-    data, _ := json.Marshal(belumTerverifikasi)
+    data, err := json.Marshal(belumTerverifikasi)
+    if err != nil {
+        log.Fatalf("marshal: %v", err)
+    }
     fmt.Println(string(data)) // {"id":"A-001","is_verified":false}
 
     belumDiisi := StatusDokumenBenar{ID: "A-002"} // IsVerified nil
-    data2, _ := json.Marshal(belumDiisi)
+    data2, err := json.Marshal(belumDiisi)
+    if err != nil {
+        log.Fatalf("marshal: %v", err)
+    }
     fmt.Println(string(data2)) // {"id":"A-002"} — is_verified benar-benar tidak ada
 }
 ```

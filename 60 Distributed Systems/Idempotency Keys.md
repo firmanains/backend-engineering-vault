@@ -51,7 +51,7 @@ Titik krusial ada di langkah kedua "Cek: abc123 sudah pernah diproses?" — serv
 
 ## Under The Hood
 
-Implementasi yang benar butuh **atomicity** antara pengecekan key dan penyimpanan hasil — kalau dua permintaan dengan idempotency key yang sama datang **hampir bersamaan** (race condition, bukan sekadar retry berurutan), keduanya bisa lolos pengecekan "belum ada" sebelum salah satu sempat menyimpan hasilnya, dan keduanya diproses sebagai transaksi terpisah meski key-nya sama — persis kegagalan yang idempotency key seharusnya cegah. Solusi yang benar butuh constraint unik di level database (`UNIQUE` pada kolom idempotency key) yang membuat percobaan kedua gagal di level database kalau keduanya mencoba menyisipkan baris yang sama secara bersamaan, dipadukan dengan penanganan error itu di kode aplikasi untuk mengembalikan hasil yang benar.
+Implementasi yang benar butuh **atomicity** antara pengecekan key dan penyimpanan hasil — kalau dua permintaan dengan idempotency key yang sama datang **hampir bersamaan** (race condition, bukan sekadar retry berurutan), keduanya bisa lolos pengecekan "belum ada" sebelum salah satu sempat menyimpan hasilnya, dan keduanya diproses sebagai transaksi terpisah meski key-nya sama — persis kegagalan yang idempotency key seharusnya cegah. Solusi yang benar butuh constraint unik di level database (`UNIQUE` pada kolom idempotency key) yang membuat percobaan kedua gagal di level database kalau keduanya mencoba menyisipkan baris yang sama secara bersamaan. Kode aplikasi harus memeriksa **kode error spesifik** unique violation (SQLSTATE `23505` di PostgreSQL, error 1062 di MySQL/MariaDB), bukan menganggap setiap kegagalan INSERT berarti "key sudah ada" — kalau tidak dibedakan, kegagalan lain (koneksi putus, tabel tidak ditemukan) akan disalahartikan sebagai duplikat dan disembunyikan di balik pesan yang salah.
 
 Detail lain yang sering luput: idempotency key harus disimpan bersama **hasil lengkap** dari permintaan pertama (bukan hanya penanda "sudah diproses"), supaya permintaan berikutnya dengan key sama benar-benar mendapat respons yang identik — server yang hanya menyimpan "key ini sudah dipakai" tanpa menyimpan hasilnya tidak bisa memberi jawaban yang benar ke percobaan kedua, hanya bisa menolak tanpa memberi informasi yang berguna ke klien.
 
@@ -66,7 +66,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+const errKodeUniqueViolation = "23505" // SQLSTATE PostgreSQL untuk unique_violation
+
+// ErrSedangDiproses adalah sentinel package-level, bukan errors.New yang
+// dibuat ulang setiap panggilan — supaya pemanggil bisa memeriksanya lewat
+// errors.Is, bukan membandingkan pesan teks.
+var ErrSedangDiproses = errors.New("idempotency: permintaan dengan key ini sedang diproses request lain")
 
 type StoredResult struct {
 	StatusCode int
@@ -74,39 +83,53 @@ type StoredResult struct {
 }
 
 // ProcessWithIdempotencyKey menunjukkan pola inti: cek-atau-simpan
-// dilakukan secara ATOMIK lewat constraint UNIQUE database, bukan
-// SELECT lalu INSERT terpisah yang rentan race condition.
+// dilakukan secara atomik lewat constraint UNIQUE database, bukan SELECT
+// lalu INSERT terpisah yang rentan race condition.
 func ProcessWithIdempotencyKey(ctx context.Context, db *sql.DB, key string, process func(ctx context.Context) (StoredResult, error)) (StoredResult, error) {
-	// Coba insert placeholder DULU — kalau key sudah ada,
-	// constraint UNIQUE akan gagal, memberi sinyal ATOMIK bahwa
-	// permintaan ini sudah (atau sedang) diproses.
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO idempotency_keys (key, status) VALUES ($1, 'processing')
 	`, key)
 
 	if err != nil {
-		// Key sudah ada — ambil hasil yang TERSIMPAN, jangan proses ulang.
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != errKodeUniqueViolation {
+			// Bukan konflik key: koneksi putus, tabel tidak ada, dsb.
+			// Ini error SUNGGUHAN, jangan disamarkan jadi "sedang diproses".
+			return StoredResult{}, fmt.Errorf("idempotency: simpan key %q: %w", key, err)
+		}
+
+		// Key sudah ada — ambil hasil yang tersimpan, jangan proses ulang.
 		var stored StoredResult
 		row := db.QueryRowContext(ctx, `
 			SELECT status_code, body FROM idempotency_keys WHERE key = $1 AND status = 'completed'
 		`, key)
 		if scanErr := row.Scan(&stored.StatusCode, &stored.Body); scanErr != nil {
-			return StoredResult{}, fmt.Errorf("idempotency: key %q sedang diproses request lain, coba lagi nanti: %w", key, errors.New("in progress"))
+			if errors.Is(scanErr, sql.ErrNoRows) {
+				// Baris ada tapi statusnya belum 'completed': permintaan
+				// pertama masih berjalan.
+				return StoredResult{}, fmt.Errorf("%w: %q", ErrSedangDiproses, key)
+			}
+			return StoredResult{}, fmt.Errorf("idempotency: baca hasil tersimpan %q: %w", key, scanErr)
 		}
 		return stored, nil
 	}
 
-	// Key baru — jalankan proses SUNGGUHAN hanya di sini, satu kali.
+	// Key baru — jalankan proses sungguhan hanya di sini, satu kali.
 	result, err := process(ctx)
 	if err != nil {
-		db.ExecContext(ctx, `DELETE FROM idempotency_keys WHERE key = $1`, key)
-		return StoredResult{}, err
+		if _, delErr := db.ExecContext(ctx, `DELETE FROM idempotency_keys WHERE key = $1`, key); delErr != nil {
+			return StoredResult{}, fmt.Errorf("idempotency: proses %q gagal (%w), dan gagal membersihkan key: %w", key, err, delErr)
+		}
+		return StoredResult{}, fmt.Errorf("idempotency: proses %q gagal: %w", key, err)
 	}
 
-	body, _ := json.Marshal(result.Body)
-	db.ExecContext(ctx, `
+	// result.Body sudah berupa JSON mentah (json.RawMessage); tidak perlu
+	// di-Marshal ulang, cukup dipakai langsung sebagai []byte.
+	if _, err := db.ExecContext(ctx, `
 		UPDATE idempotency_keys SET status='completed', status_code=$2, body=$3 WHERE key=$1
-	`, key, result.StatusCode, body)
+	`, key, result.StatusCode, []byte(result.Body)); err != nil {
+		return StoredResult{}, fmt.Errorf("idempotency: simpan hasil %q: %w", key, err)
+	}
 
 	return result, nil
 }

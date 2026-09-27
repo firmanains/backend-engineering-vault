@@ -63,10 +63,11 @@ Menguji logic klien (retry saat partner merespons 500) — menjawab masalah kedu
 
 ```go
 func TestCallPartnerWithRetry(t *testing.T) {
-    var jumlahPanggilan int
+    // Handler berjalan di goroutine milik server, bukan goroutine test,
+    // jadi counter-nya memakai atomic supaya aman dibaca dari test.
+    var jumlahPanggilan atomic.Int32
     fakePartner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        jumlahPanggilan++
-        if jumlahPanggilan < 3 {
+        if jumlahPanggilan.Add(1) < 3 {
             w.WriteHeader(http.StatusInternalServerError) // gagal 2x dulu
             return
         }
@@ -77,7 +78,7 @@ func TestCallPartnerWithRetry(t *testing.T) {
     err := callPartnerWithRetry(context.Background(), fakePartner.URL, 3)
 
     require.NoError(t, err)
-    require.Equal(t, 3, jumlahPanggilan) // membuktikan retry benar-benar terjadi
+    require.Equal(t, int32(3), jumlahPanggilan.Load()) // membuktikan retry benar-benar terjadi
 }
 ```
 

@@ -26,7 +26,7 @@ FROM permohonan
 GROUP BY instansi_id;
 ```
 
-Di PostgreSQL, ini langsung ditolak dengan error `column "permohonan.tanggal_ajuan" must appear in the GROUP BY clause or be used in an aggregate function`. Tapi kalau dijalankan di MariaDB dengan `ONLY_FULL_GROUP_BY` tidak aktif (kondisi yang di beberapa instalasi lama masih jadi default), query ini **jalan tanpa error** — dan mengembalikan `tanggal_ajuan` dari salah satu baris di kelompok itu, dipilih **secara tidak terdefinisi** oleh mesin database. Laporan tampak benar sampai suatu hari nilai yang keluar untuk instansi tertentu berubah tanpa ada perubahan data yang jelas — karena mesin database kebetulan memilih baris fisik yang berbeda kali ini. Ini bukan bug yang mudah dilacak: tidak ada error, tidak ada log, hanya angka yang diam-diam tidak konsisten antar-run.
+Di PostgreSQL, ini langsung ditolak dengan error `column "permohonan.tanggal_ajuan" must appear in the GROUP BY clause or be used in an aggregate function`. Tapi kalau dijalankan di MariaDB dengan `ONLY_FULL_GROUP_BY` tidak aktif (dan itulah kondisi default MariaDB), query ini **jalan tanpa error** — dan mengembalikan `tanggal_ajuan` dari salah satu baris di kelompok itu, dipilih **secara tidak terdefinisi** oleh mesin database. Laporan tampak benar sampai suatu hari nilai yang keluar untuk instansi tertentu berubah tanpa ada perubahan data yang jelas — karena mesin database kebetulan memilih baris fisik yang berbeda kali ini. Ini bukan bug yang mudah dilacak: tidak ada error, tidak ada log, hanya angka yang diam-diam tidak konsisten antar-run.
 
 ## Intuition
 
@@ -108,12 +108,7 @@ func AmbilRingkasanPerInstansi(ctx context.Context, db *sql.DB, tahun int) ([]Ri
 
 ## In His Stack
 
-MariaDB mewarisi mode `sql_mode` dari MySQL, dan `ONLY_FULL_GROUP_BY` adalah salah satu flag di dalamnya — di versi/instalasi yang lebih baru biasanya sudah aktif secara default, tapi instalasi lama yang belum pernah diaudit `sql_mode`-nya (umum di sistem legacy Yii1) bisa saja masih longgar. Ini penting dicek secara eksplisit, bukan diasumsikan: `SELECT @@sql_mode;` di MariaDB akan menunjukkan apakah proteksi ini aktif. Kalau tim mengandalkan query lama yang secara diam-diam bergantung pada perilaku longgar ini, mengaktifkan `ONLY_FULL_GROUP_BY` bisa mematahkan query itu — tapi mematahkannya secara **tegas dan terlihat** jauh lebih baik daripada membiarkannya terus menghasilkan angka yang tidak terdefinisi.
-
-> [!question] Perlu diverifikasi
-> Klaim: `ONLY_FULL_GROUP_BY` aktif secara default di instalasi MariaDB yang lebih baru.
-> Kenapa ragu: default `sql_mode` berbeda antara MySQL dan MariaDB (dua project yang bercabang terpisah) dan bisa berubah antar versi rilis masing-masing; jangan diasumsikan sama antara keduanya.
-> Cara verifikasi: jalankan `SELECT @@sql_mode;` langsung di instance MariaDB yang relevan, atau periksa release notes MariaDB untuk versi yang dipakai.
+MariaDB mewarisi mode `sql_mode` dari MySQL, dan `ONLY_FULL_GROUP_BY` adalah salah satu flag di dalamnya. Di sinilah kedua database itu berbeda arah: MySQL 5.7 ke atas mengaktifkannya secara default, sementara **MariaDB tidak**. Dokumentasi resmi MariaDB mencantumkan default `sql_mode` sejak 10.2.4 sebagai `STRICT_TRANS_TABLES, ERROR_FOR_DIVISION_BY_ZERO, NO_AUTO_CREATE_USER, NO_ENGINE_SUBSTITUTION`, tanpa `ONLY_FULL_GROUP_BY`. Artinya, di stack MariaDB perilaku longgar yang dibahas di note ini bukan sisa instalasi lama, melainkan perilaku bawaan, kecuali seseorang sengaja menambahkan flag itu. Periksa langsung dengan `SELECT @@sql_mode;`; konfigurasi server bisa saja sudah diubah dari default. Kalau tim mengandalkan query lama yang secara diam-diam bergantung pada perilaku longgar ini, mengaktifkan `ONLY_FULL_GROUP_BY` bisa mematahkan query itu — tapi mematahkannya secara **tegas dan terlihat** jauh lebih baik daripada membiarkannya terus menghasilkan angka yang tidak terdefinisi.
 
 ## Trade-offs and When Not To Use It
 

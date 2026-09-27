@@ -48,7 +48,7 @@ func cetakJumlah(nama string, jumlah int) {
 }
 ```
 
-Menjalankan `go vet ./...` pada kode ini akan mencetak peringatan eksplisit seperti `Printf format %d has arg jumlah of wrong type int` atau serupa — mendeteksi bahwa verb `%d` dipasangkan dengan argumen yang salah tipe, murni lewat analisis statis, tanpa perlu menjalankan program sama sekali.
+Menjalankan `go vet ./...` pada kode ini akan mencetak peringatan eksplisit seperti `fmt.Printf format %s has arg jumlah of wrong type int` — mendeteksi bahwa verb `%s` dipasangkan dengan argumen bertipe `int`, murni lewat analisis statis, tanpa perlu menjalankan program sama sekali. Vet melaporkan ketidakcocokan pertama yang ia temukan di satu pemanggilan; setelah baris itu diperbaiki, jalankan ulang untuk melihat sisanya.
 
 Alur kerja CI yang umum untuk service Go, menggabungkan semua tool di atas secara berurutan:
 

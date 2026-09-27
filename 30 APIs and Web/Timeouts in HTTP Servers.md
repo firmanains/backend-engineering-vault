@@ -32,17 +32,16 @@ Analogi "jam-jam terpisah yang rapi" ini bocor pada satu hal: jam di pengadilan 
 
 ```mermaid
 flowchart LR
-    A["Koneksi dibuka"] --> B["ReadHeaderTimeout:\nbatas waktu terima header"]
-    B --> C["ReadTimeout:\nbatas waktu terima seluruh body"]
-    C --> D["Handler diproses"]
-    D --> E["WriteTimeout:\nbatas waktu kirim response"]
+    A["Request mulai dibaca"] --> B["ReadHeaderTimeout:\nbatas waktu terima header"]
+    B --> C["Header selesai dibaca:\njam WriteTimeout MULAI berjalan"]
+    C --> D["ReadTimeout (dihitung dari awal):\nbatas terima header + body"]
+    D --> E["Handler diproses\n+ response ditulis\n(masih di dalam jam WriteTimeout)"]
     E --> F["IdleTimeout:\nberapa lama koneksi keep-alive\nboleh menunggu request berikutnya"]
 ```
 
-> [!question] Perlu diverifikasi
-> Klaim: cakupan dan interaksi persis antara `ReadTimeout` dan `WriteTimeout` (apakah salah satunya mencakup total siklus, atau keduanya benar-benar independen per fase) bisa berbeda nuansa antar versi Go dan butuh pembacaan dokumentasi cermat.
-> Kenapa ragu: dokumentasi resmi Go sendiri mencatat nuansa ini dengan hati-hati, dan kesalahpahaman umum soal cakupan timeout ini pernah jadi sumber diskusi komunitas.
-> Cara verifikasi: baca dokumentasi resmi `net/http.Server` (pkg.go.dev/net/http) untuk versi Go yang dipakai, khususnya deskripsi lengkap `ReadTimeout` dan `WriteTimeout`.
+Diagram ini meluruskan salah paham yang paling umum: `WriteTimeout` **bukan** "batas waktu mengirim response" yang baru mulai setelah handler selesai. Dokumentasi resmi `net/http` menyatakan jam `WriteTimeout` direset setiap kali header request baru selesai dibaca. Artinya ia membatasi waktu membaca body, menjalankan handler, dan menulis response sekaligus. Handler yang berjalan lebih lama dari `WriteTimeout` tidak dihentikan, tapi tulisannya gagal, dan client menerima koneksi terputus tanpa response.
+
+Dua aturan default yang juga tertulis di dokumentasi resmi: kalau `ReadHeaderTimeout` nol, nilai `ReadTimeout` yang dipakai; kalau `IdleTimeout` nol, nilai `ReadTimeout` juga yang dipakai. Kalau semuanya nol, tidak ada batas sama sekali. Dokumentasi yang sama menyarankan kebanyakan pengguna memakai `ReadHeaderTimeout` dan membiarkan handler menentukan batas untuk body-nya sendiri.
 
 ## In Go
 
@@ -96,7 +95,7 @@ Timeout yang terlalu ketat memotong client yang lambat tapi sah (misalnya upload
 4. Desain terbuka: sebuah service Go menerima dua jenis trafik yang sangat berbeda — endpoint JSON kecil yang harus merespons cepat, dan endpoint upload dokumen besar dari kantor cabang dengan koneksi lambat. Rancang strategi konfigurasi timeout yang mengakomodasi keduanya tanpa mengorbankan proteksi salah satunya.
 
 > [!success]- Kunci jawaban
-> Karena `http.Server` hanya punya satu set timeout global per instance server, satu strategi yang umum adalah menjalankan dua listener/server terpisah dengan konfigurasi timeout berbeda — satu untuk endpoint JSON kecil dengan `ReadTimeout`/`WriteTimeout` ketat (mendeteksi masalah cepat), satu lagi khusus untuk endpoint upload dengan timeout yang jauh lebih longgar. Alternatif lain: pakai timeout global yang cukup longgar untuk mengakomodasi upload (fase terlama), tapi terapkan batas yang lebih ketat secara spesifik di level handler untuk endpoint JSON kecil lewat `context.WithTimeout` (lihat [[Context Propagation in HTTP Servers]]) yang membatalkan pemrosesan lebih awal meski koneksi TCP-nya sendiri masih dalam batas server yang longgar.
+> Sejak Go 1.20, jalan yang paling rapi adalah `http.ResponseController`: server memakai timeout global yang ketat, lalu handler upload melonggarkan deadline koneksinya sendiri, misalnya `rc := http.NewResponseController(w)` diikuti `rc.SetReadDeadline(time.Now().Add(10 * time.Minute))` dan `rc.SetWriteDeadline(...)` yang setara. Proteksi default tetap berlaku untuk semua endpoint lain. Tanpa fitur itu, karena `http.Server` hanya punya satu set timeout global per instance server, strategi yang umum adalah menjalankan dua listener/server terpisah dengan konfigurasi timeout berbeda — satu untuk endpoint JSON kecil dengan `ReadTimeout`/`WriteTimeout` ketat (mendeteksi masalah cepat), satu lagi khusus untuk endpoint upload dengan timeout yang jauh lebih longgar. Alternatif lain: pakai timeout global yang cukup longgar untuk mengakomodasi upload (fase terlama), tapi terapkan batas yang lebih ketat secara spesifik di level handler untuk endpoint JSON kecil lewat `context.WithTimeout` (lihat [[Context Propagation in HTTP Servers]]) yang membatalkan pemrosesan lebih awal meski koneksi TCP-nya sendiri masih dalam batas server yang longgar.
 
 ## Self-Check
 

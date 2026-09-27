@@ -18,7 +18,7 @@ created: 2026-08-02
 
 ## The Problem
 
-Dashboard petugas legal-services perlu menampilkan notifikasi begitu ada permohonan baru yang masuk, tanpa petugas harus me-refresh halaman. Solusi pertama tim adalah polling: browser memanggil endpoint `/notifikasi/terbaru` setiap tiga detik. Dengan seratus petugas online bersamaan, ini menghasilkan lebih dari dua ribu request per menit ke server, sebagian besar besar mengembalikan "tidak ada yang baru" — beban server yang hampir seluruhnya sia-sia, persis masalah yang dibahas di [[Polling vs Push]].
+Dashboard petugas legal-services perlu menampilkan notifikasi begitu ada permohonan baru yang masuk, tanpa petugas harus me-refresh halaman. Solusi pertama tim adalah polling: browser memanggil endpoint `/notifikasi/terbaru` setiap tiga detik. Dengan seratus petugas online bersamaan, ini menghasilkan lebih dari dua ribu request per menit ke server, sebagian besar mengembalikan "tidak ada yang baru" — beban server yang hampir seluruhnya sia-sia, persis masalah yang dibahas di [[Polling vs Push]].
 
 Menurunkan interval polling justru memperburuk keadaan; menaikkannya membuat notifikasi terasa lambat. Yang sebenarnya dibutuhkan bukan polling yang lebih pintar, tapi mekanisme di mana server bisa **mendorong** pesan ke client kapan saja terjadi sesuatu, tanpa menunggu client bertanya lebih dulu — dan idealnya, client juga bisa mengirim balik tanpa membuka koneksi baru setiap kali (misalnya menandai notifikasi sudah dibaca).
 
@@ -106,9 +106,17 @@ func kirimNotifikasi(conn *websocket.Conn, isi string) error {
 
 Pola produksi yang umum: satu goroutine per koneksi untuk membaca pesan masuk (`ReadMessage` di dalam loop), dan sebuah **hub** terpusat yang menyimpan peta koneksi aktif (misalnya per petugas atau per ruangan chat) sehingga event dari bagian lain aplikasi bisa didorong ke koneksi yang tepat tanpa setiap goroutine saling mengenal satu sama lain secara langsung.
 
+Satu aturan `gorilla/websocket` yang sering dilanggar: sebuah koneksi hanya boleh punya **satu** penulis pada satu waktu. Memanggil `kirimNotifikasi` dari beberapa goroutine sekaligus untuk koneksi yang sama adalah data race. Karena itu hub biasanya memberi setiap koneksi satu goroutine penulis khusus yang membaca dari channel kiriman, dan goroutine itu juga yang mengirim ping berkala. Di sisi pembaca, `SetReadDeadline` yang diperpanjang setiap kali pong diterima adalah cara mendeteksi koneksi yang sudah mati tanpa pemberitahuan.
+
 ## In His Stack
 
-Kubernetes membuat WebSocket lebih rumit dari yang terlihat: load balancer default sering membagi request secara round-robin per request HTTP, cocok untuk REST yang stateless, tapi salah untuk WebSocket yang butuh **koneksi yang sama** bertahan ke **pod yang sama** selama sesi itu hidup (session affinity / sticky session). Ingress controller harus dikonfigurasi eksplisit untuk mendukung upgrade WebSocket dan sticky session, dan probe kesehatan (readiness/liveness) yang mematikan pod di tengah banyak koneksi WebSocket aktif bisa memutus semuanya sekaligus — pertimbangan yang tidak muncul sama sekali untuk service REST biasa.
+Kubernetes membuat WebSocket lebih rumit dari yang terlihat, tapi bukan karena alasan yang sering disangka. Satu koneksi WebSocket adalah satu koneksi TCP yang, setelah upgrade, tetap menempel ke pod yang sama sampai ditutup; load balancer tidak memindahkannya per pesan. Kerumitan yang sesungguhnya ada tiga:
+
+- **Proxy harus mengizinkan koneksi panjang.** Ingress/Nginx wajib meneruskan header `Upgrade` dan punya timeout baca yang cukup panjang; `proxy_read_timeout` default Nginx (60 detik) memutus koneksi yang diam lebih lama dari itu, kecuali ping berkala menjaganya tetap aktif.
+- **Hub hidup di memori tiap pod.** Dengan tiga replika, notifikasi yang dibuat di pod A tidak bisa dikirim ke petugas yang tersambung ke pod B. Dibutuhkan lapisan pub/sub bersama (misalnya Redis Pub/Sub atau topic di broker) yang menyebarkan setiap event ke semua pod, lalu masing-masing pod mengirimkannya ke koneksi lokalnya.
+- **Deploy memutus semua koneksi di pod itu sekaligus.** Client wajib punya reconnect dengan backoff dan jitter; tanpa itu, ribuan client yang tersambung ulang di detik yang sama menjadi thundering herd.
+
+Sticky session baru relevan kalau reconnect harus kembali ke pod yang menyimpan state sesi di memori, atau kalau fallback long polling membuat banyak request HTTP terpisah yang harus sampai ke pod yang sama.
 
 Yii2 punya dukungan WebSocket lewat library pihak ketiga (biasanya berjalan sebagai proses terpisah dari PHP-FPM, karena model PHP tradisional per-request tidak cocok untuk koneksi yang bertahan lama), sehingga fitur real-time semacam ini di ekosistem PHP sering ditangani service Go terpisah yang memang dirancang untuk menyimpan banyak koneksi hidup sekaligus — persis kekuatan goroutine yang dibahas di [[Goroutines]].
 
@@ -130,17 +138,19 @@ WebSocket unggul untuk kasus yang benar-benar butuh dua arah dan latency rendah:
 ## Exercises
 
 1. Jelaskan kenapa WebSocket dimulai sebagai request HTTP biasa, bukan protokol terpisah sejak awal.
-2. Sebuah load balancer round-robin membagi request WebSocket secara acak ke beberapa pod backend. Jelaskan apa yang salah dengan setup ini dan bagaimana memperbaikinya.
+2. Service WebSocket dijalankan tiga replika di belakang Service Kubernetes. Notifikasi untuk petugas X dibuat oleh handler yang kebetulan berjalan di pod A, padahal petugas X tersambung ke pod B. Jelaskan kenapa notifikasi itu tidak sampai, dan bagaimana memperbaikinya.
 3. Rancang struktur data Go sederhana (`hub`) yang menyimpan peta petugas ID ke koneksi WebSocket aktifnya, dan jelaskan bagaimana `kirimNotifikasi` memakainya untuk mengirim pesan ke petugas tertentu.
 4. **(Open-ended)** Dashboard petugas butuh notifikasi real-time, dan sebagian petugas mengakses dari jaringan kantor pemerintah yang firewall-nya kadang memblokir upgrade WebSocket. Rancang strategi fallback yang membuat fitur notifikasi tetap berfungsi (meski kurang optimal) untuk petugas di jaringan yang membatasi itu, tanpa menulis dua implementasi backend yang sepenuhnya terpisah.
 
 > [!success]- Kunci jawaban
+> Untuk soal 2: hub di pod A hanya mengenal koneksi yang tersambung ke pod A. Perbaikannya adalah lapisan pub/sub bersama: pod A menerbitkan event "notifikasi untuk petugas X" ke Redis Pub/Sub (atau topic broker), semua pod berlangganan, dan pod B yang memegang koneksi petugas X mengirimkannya. Sticky session tidak menyelesaikan ini, karena masalahnya bukan di mana koneksi berada, tapi di pod mana event itu lahir.
+>
 > Untuk soal 4: server bisa mendukung dua jalur sekaligus dari satu sumber event yang sama — begitu ada notifikasi baru, dorong ke koneksi WebSocket yang tersambung, dan simpan juga di penyimpanan sementara (misalnya Redis list per petugas) yang bisa diambil lewat endpoint polling biasa untuk client yang gagal melakukan upgrade WebSocket. Client di sisi frontend mencoba WebSocket lebih dulu, dan jatuh ke long polling otomatis kalau upgrade gagal atau terputus berulang kali — pola yang dipakai library seperti Socket.IO secara built-in, meski di sini dirancang manual dari sumber event yang sama supaya logika bisnis tidak diduplikasi.
 
 ## Self-Check
 
 - Kenapa WebSocket dimulai lewat handshake HTTP, bukan protokol TCP mentah sejak awal?
-- Apa masalah utama load balancing untuk koneksi WebSocket dibanding request HTTP biasa?
+- Kenapa service WebSocket dengan beberapa replika butuh lapisan pub/sub bersama untuk mengirim notifikasi?
 - Kapan WebSocket adalah pilihan berlebihan dibanding Server-Sent Events atau long polling?
 
 ## Connected Notes

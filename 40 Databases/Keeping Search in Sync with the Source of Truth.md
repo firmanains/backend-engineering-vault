@@ -45,7 +45,7 @@ Diagram ini menunjukkan tiga strategi umum menjaga sinkronisasi, masing-masing d
 
 ## Under The Hood
 
-**Dual write** punya masalah struktural yang tidak bisa ditambal sepenuhnya tanpa mekanisme tambahan: tidak ada transaksi yang mencakup **dua sistem berbeda** (database relasional dan Elasticsearch) sekaligus — kalaupun aplikasi menunggu konfirmasi dari keduanya sebelum menganggap operasi "sukses", tetap ada jendela waktu di antara kedua tulisan itu di mana kegagalan pada satu sisi meninggalkan sistem dalam keadaan tidak konsisten. Pola **transactional outbox** (dibahas lebih dalam di domain APIs level intermediate) adalah salah satu cara memperbaiki ini — menulis "niat untuk sinkronisasi" sebagai bagian dari transaksi database yang sama, lalu proses terpisah yang membaca niat itu dan benar-benar mendorongnya ke Elasticsearch, dengan jaminan **at-least-once** (bisa dicoba ulang kalau gagal) alih-alih dual write yang bisa gagal diam-diam tanpa jejak.
+**Dual write** punya masalah struktural yang tidak bisa ditambal sepenuhnya tanpa mekanisme tambahan: tidak ada transaction yang mencakup **dua sistem berbeda** (database relasional dan Elasticsearch) sekaligus — kalaupun aplikasi menunggu konfirmasi dari keduanya sebelum menganggap operasi "sukses", tetap ada jendela waktu di antara kedua tulisan itu di mana kegagalan pada satu sisi meninggalkan sistem dalam keadaan tidak konsisten. Pola **transactional outbox** (dibahas lebih dalam di [[../30 APIs and Web/The Transactional Outbox Pattern|The Transactional Outbox Pattern]]) adalah salah satu cara memperbaiki ini — menulis "niat untuk sinkronisasi" sebagai bagian dari transaction database yang sama, lalu proses terpisah yang membaca niat itu dan benar-benar mendorongnya ke Elasticsearch, dengan jaminan **at-least-once** (bisa dicoba ulang kalau gagal) alih-alih dual write yang bisa gagal diam-diam tanpa jejak.
 
 **Full reindex** — proses membangun ulang seluruh index dari nol berdasarkan seluruh data di database — adalah jaring pengaman yang harus selalu tersedia terlepas dari strategi sinkronisasi harian yang dipakai, karena drift yang terakumulasi dari waktu ke waktu (bug kecil di CDC, kegagalan batch sync yang tidak terdeteksi lama) pada akhirnya butuh cara untuk "menyamakan ulang" kedua sistem dari awal. Full reindex pada dataset besar bisa memakan waktu signifikan dan membebani database sumber (harus membaca seluruh data) — perlu direncanakan sebagai operasi terjadwal dengan sengaja, bukan dijalankan reaktif secara panik saat drift sudah parah.
 
@@ -57,22 +57,15 @@ package outbox
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 )
 
-// EntriOutbox dicatat dalam TRANSAKSI YANG SAMA dengan perubahan data
-// utama — menjamin kalau perubahan data berhasil di-commit, niat untuk
-// sinkronisasi ke Elasticsearch JUGA pasti tercatat, tidak pernah salah
-// satu saja (berbeda dari dual write yang bisa gagal di salah satu sisi).
-type EntriOutbox struct {
-	ID        int64
-	Entitas   string
-	EntitasID int64
-	Aksi      string // "index" atau "delete"
-	Payload   []byte
-}
-
+// UbahStatusDenganOutbox mencatat entri outbox dalam transaction yang sama
+// dengan perubahan data utama. Kalau UPDATE berhasil di-commit, niat untuk
+// sinkronisasi ke Elasticsearch juga pasti tercatat, tidak pernah hanya
+// salah satunya (berbeda dari dual write).
 func UbahStatusDenganOutbox(ctx context.Context, db *sql.DB, permohonanID int64, statusBaru string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -84,61 +77,106 @@ func UbahStatusDenganOutbox(ctx context.Context, db *sql.DB, permohonanID int64,
 		return fmt.Errorf("update status permohonan: %w", err)
 	}
 
-	payload, err := json.Marshal(map[string]any{"id": permohonanID, "status": statusBaru})
-	if err != nil {
-		return fmt.Errorf("marshal payload outbox: %w", err)
-	}
-
-	// Dicatat dalam TRANSAKSI YANG SAMA — kalau UPDATE di atas berhasil
-	// commit, baris outbox ini JUGA pasti ter-commit, tidak pernah hilang.
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO outbox (entitas, entitas_id, aksi, payload, diproses)
-		VALUES ('permohonan', ?, 'index', ?, false)
-	`, permohonanID, payload)
-	if err != nil {
+	// Entri outbox sengaja hanya berisi ID entitas, bukan isi dokumen.
+	// Worker akan membaca keadaan terbaru dari database saat memprosesnya.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO outbox (entitas, entitas_id, diproses)
+		VALUES ('permohonan', ?, false)
+	`, permohonanID); err != nil {
 		return fmt.Errorf("catat entri outbox: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit perubahan status: %w", err)
+	}
+	return nil
 }
 
-// ProsesOutboxKeElasticsearch dijalankan sebagai worker terpisah yang
-// membaca entri outbox yang belum diproses, mendorongnya ke Elasticsearch,
-// dan menandainya selesai — kalau gagal, entri tetap "belum diproses" dan
-// akan dicoba ulang pada iterasi berikutnya (jaminan at-least-once).
-func ProsesOutboxKeElasticsearch(ctx context.Context, db *sql.DB, kirimKeES func(ctx context.Context, payload []byte) error) error {
+// Dokumen adalah bentuk permohonan yang dikirim ke index pencarian.
+type Dokumen struct {
+	ID     int64
+	Nomor  string
+	Status string
+}
+
+// Indexer adalah abstraksi kecil atas klien Elasticsearch.
+type Indexer interface {
+	Simpan(ctx context.Context, d Dokumen) error
+	Hapus(ctx context.Context, id int64) error
+}
+
+// ProsesOutbox membaca entri yang belum diproses, lalu untuk setiap entri
+// membaca keadaan TERBARU entitas dari database dan menyalinnya ke index.
+// Karena yang dikirim selalu keadaan terbaru, urutan pemrosesan dan
+// pengulangan tidak berbahaya: entri lama yang dicoba ulang belakangan
+// tidak bisa menimpa index dengan data usang. Entitas yang sudah dihapus
+// dari database ikut dihapus dari index.
+func ProsesOutbox(ctx context.Context, db *sql.DB, idx Indexer, logger *slog.Logger) error {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, payload FROM outbox WHERE diproses = false ORDER BY id ASC LIMIT 100
+		SELECT id, entitas_id FROM outbox
+		WHERE diproses = false AND entitas = 'permohonan'
+		ORDER BY id ASC LIMIT 100
 	`)
 	if err != nil {
-		return fmt.Errorf("ambil entri outbox belum diproses: %w", err)
+		return fmt.Errorf("ambil entri outbox: %w", err)
 	}
-	defer rows.Close()
-
-	var idSelesai []int64
+	type entri struct{ id, entitasID int64 }
+	var antrean []entri
 	for rows.Next() {
-		var id int64
-		var payload []byte
-		if err := rows.Scan(&id, &payload); err != nil {
+		var e entri
+		if err := rows.Scan(&e.id, &e.entitasID); err != nil {
+			rows.Close()
 			return fmt.Errorf("scan entri outbox: %w", err)
 		}
-
-		if err := kirimKeES(ctx, payload); err != nil {
-			// Gagal kirim SATU entri tidak menghentikan proses entri
-			// lain — dicoba lagi pada iterasi berikutnya.
-			continue
-		}
-		idSelesai = append(idSelesai, id)
+		antrean = append(antrean, e)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterasi entri outbox: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("tutup hasil outbox: %w", err)
 	}
 
-	for _, id := range idSelesai {
-		if _, err := db.ExecContext(ctx, `UPDATE outbox SET diproses = true WHERE id = ?`, id); err != nil {
-			return fmt.Errorf("tandai outbox selesai id %d: %w", id, err)
+	for _, e := range antrean {
+		if err := sinkronkanSatu(ctx, db, idx, e.entitasID); err != nil {
+			// Entri tetap belum diproses dan akan dicoba lagi di putaran
+			// berikutnya. Karena worker selalu membaca keadaan terbaru,
+			// melanjutkan ke entri lain tidak merusak urutan.
+			logger.Warn("gagal sinkronkan permohonan ke index",
+				"outbox_id", e.id, "permohonan_id", e.entitasID, "error", err)
+			continue
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE outbox SET diproses = true WHERE id = ?`, e.id); err != nil {
+			return fmt.Errorf("tandai outbox %d selesai: %w", e.id, err)
 		}
 	}
 	return nil
 }
+
+func sinkronkanSatu(ctx context.Context, db *sql.DB, idx Indexer, id int64) error {
+	var d Dokumen
+	err := db.QueryRowContext(ctx,
+		`SELECT id, nomor_permohonan, status FROM permohonan WHERE id = ?`, id,
+	).Scan(&d.ID, &d.Nomor, &d.Status)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Baris sudah tidak ada di sumber kebenaran: hapus juga dari index.
+		if err := idx.Hapus(ctx, id); err != nil {
+			return fmt.Errorf("hapus dokumen %d dari index: %w", id, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("baca permohonan %d: %w", id, err)
+	}
+	if err := idx.Simpan(ctx, d); err != nil {
+		return fmt.Errorf("simpan dokumen %d ke index: %w", id, err)
+	}
+	return nil
+}
 ```
+
+Dua keputusan desain di kode ini sering terlewat. Pertama, entri outbox hanya membawa ID, dan worker membaca ulang keadaan terbaru. Kalau entri membawa payload (misalnya status saat itu), entri lama yang gagal lalu dicoba ulang setelah entri yang lebih baru berhasil akan menimpa index dengan status usang. Kedua, penghapusan ditangani dengan cara yang sama: `sql.ErrNoRows` berarti baris sudah dihapus, jadi dokumen di index ikut dihapus. Kalau lebih dari satu worker berjalan bersamaan, ambil entri dengan `FOR UPDATE SKIP LOCKED` di dalam transaction (lihat [[Locking and Row Locks]]).
 
 ## In His Stack
 
@@ -146,7 +184,7 @@ Untuk sistem legal-services yang menggabungkan MariaDB dan Elasticsearch, "data 
 
 ## Trade-offs and When Not To Use It
 
-Membangun mekanisme sinkronisasi yang benar-benar andal (outbox pattern, CDC) menambah kompleksitas infrastruktur yang signifikan — untuk sistem pencarian yang kebutuhan kesegarannya longgar (misalnya pencarian arsip dokumen lama yang jarang berubah), batch sync sederhana yang berjalan tiap beberapa jam sudah lebih dari cukup, dan membangun CDC penuh untuk kasus ini adalah over-engineering. Sebaliknya, untuk sistem yang butuh hasil pencarian mencerminkan perubahan hampir seketika (misalnya pencarian status permohonan yang aktif diproses), batch sync sekali sehari jelas tidak memadai, dan investasi ke CDC atau setidaknya dual write dengan outbox pattern jadi sepadan. Keputusan strategi sinkronisasi harus mengikuti kebutuhan kesegaran data yang **sesungguhnya** dibutuhkan pengguna, bukan default ke solusi paling canggih atau paling sederhana tanpa mempertimbangkan kebutuhan nyata.
+Membangun mekanisme sinkronisasi yang benar-benar andal (outbox pattern, CDC) menambah kompleksitas infrastruktur yang signifikan — untuk sistem pencarian yang kebutuhan kesegarannya longgar (misalnya pencarian arsip dokumen lama yang jarang berubah), batch sync sederhana yang berjalan tiap beberapa jam sudah lebih dari cukup, dan membangun CDC penuh untuk kasus ini adalah over-engineering. Sebaliknya, untuk sistem yang butuh hasil pencarian mencerminkan perubahan hampir seketika (misalnya pencarian status permohonan yang aktif diproses), batch sync sekali sehari jelas tidak memadai, dan investasi ke CDC atau setidaknya transactional outbox jadi sepadan. Keputusan strategi sinkronisasi harus mengikuti kebutuhan kesegaran data yang **sesungguhnya** dibutuhkan pengguna, bukan default ke solusi paling canggih atau paling sederhana tanpa mempertimbangkan kebutuhan nyata.
 
 ## Common Mistakes
 
@@ -168,7 +206,7 @@ Membangun mekanisme sinkronisasi yang benar-benar andal (outbox pattern, CDC) me
 
 > [!success]- Kunci jawaban
 > **1.** Dual write menulis ke dua sistem berbeda secara berurutan tanpa transaksi yang mencakup keduanya sekaligus — kalau tulisan pertama (database) berhasil tapi tulisan kedua (Elasticsearch) gagal karena alasan apa pun (jaringan, Elasticsearch down, timeout), tidak ada mekanisme otomatis yang mencatat bahwa sinkronisasi ini gagal dan perlu dicoba ulang. Aplikasi mungkin bahkan menganggap seluruh operasi "sukses" kalau error dari sisi Elasticsearch tidak ditangani dengan benar (misalnya di-log tapi tidak menggagalkan response ke pengguna) — drift terjadi tanpa jejak yang mudah ditemukan sampai seseorang secara spesifik membandingkan kedua sistem.
-> **4.** (a) Tambahkan metrik eksplisit untuk proses batch sync: jumlah dokumen berhasil disinkronkan per run, waktu proses terakhir kali berhasil (`last_successful_sync`), dan alert otomatis kalau `last_successful_sync` lebih tua dari beberapa kali interval normal (misalnya lebih dari 2 jam untuk job yang seharusnya jalan tiap 30 menit) — mengubah kegagalan diam-diam menjadi sinyal yang eksplisit terlihat operator, bukan bergantung pada laporan pengguna. (b) Alih-alih full reindex penuh, jalankan sinkronisasi **bertarget** hanya untuk baris yang berubah dalam rentang waktu tiga hari terakhir (`WHERE updated_at >= now() - interval '3 days'`) — asumsikan tabel punya kolom timestamp perubahan yang bisa diandalkan; ini memperbaiki drift dari periode yang bermasalah tanpa perlu memproses ulang seluruh dataset yang tidak terpengaruh sama sekali, jauh lebih cepat dan lebih murah dibanding full reindex total.
+> **4.** (a) Tambahkan metrik eksplisit untuk proses batch sync: jumlah dokumen berhasil disinkronkan per run, waktu proses terakhir kali berhasil (`last_successful_sync`), dan alert otomatis kalau `last_successful_sync` lebih tua dari beberapa kali interval normal (misalnya lebih dari 2 jam untuk job yang seharusnya jalan tiap 30 menit) — mengubah kegagalan diam-diam menjadi sinyal yang eksplisit terlihat operator, bukan bergantung pada laporan pengguna. (b) Alih-alih full reindex penuh, jalankan sinkronisasi **bertarget** untuk baris yang berubah selama tiga hari itu (`WHERE updated_at >= NOW() - INTERVAL 3 DAY`), dengan asumsi kolom `updated_at` bisa diandalkan (diperbarui oleh setiap jalur tulis, termasuk script manual). Ada satu lubang besar di pendekatan ini: **baris yang dihapus tidak punya `updated_at`**, karena barisnya sudah tidak ada. Penghapusan selama tiga hari itu harus ditangani terpisah. Pilihannya: pakai soft delete (`dihapus_pada`) sehingga penghapusan ikut terlihat oleh query `updated_at`; atau bandingkan daftar ID. Ambil semua ID dokumen di index untuk rentang yang terdampak, cocokkan dengan ID yang masih ada di database, lalu hapus dari index ID yang tidak ditemukan. Tanpa langkah ini, "data hantu" seperti di The Problem tetap bertahan setelah perbaikan.
 
 ## Self-Check
 
@@ -182,7 +220,7 @@ Membangun mekanisme sinkronisasi yang benar-benar andal (outbox pattern, CDC) me
 - [[Relevance Scoring]] — hasil pencarian yang relevan tidak berguna kalau datanya sendiri sudah usang atau salah karena drift sinkronisasi, penutup alami dari rangkaian topik search di domain ini.
 - [[Read Replicas and Replication Lag]] — lag antara database dan search index adalah masalah yang secara konseptual identik dengan replication lag, hanya antara dua sistem yang sepenuhnya berbeda alih-alih dua instance database yang sama.
 - [[../60 Distributed Systems/Change Data Capture|Change Data Capture]] — strategi sinkronisasi paling andal yang dibahas mendalam di level senior, disinggung sebagai salah satu dari tiga strategi di note ini.
-- [[../30 APIs and Web/_Overview|APIs and Web Overview]] — transactional outbox pattern yang dipakai untuk sinkronisasi andal di note ini dibahas lebih luas sebagai pola integrasi di domain APIs, level intermediate.
+- [[../30 APIs and Web/The Transactional Outbox Pattern|The Transactional Outbox Pattern]] — pola yang dipakai untuk sinkronisasi andal di note ini, dibahas lengkap sebagai pola integrasi di domain APIs.
 - [[../70 Infrastructure and Delivery/The Three Pillars of Observability|The Three Pillars of Observability]] — pemantauan kesehatan proses sinkronisasi (lag, tingkat kegagalan) adalah aplikasi langsung dari prinsip observability di domain itu.
 
 ## Further Reading

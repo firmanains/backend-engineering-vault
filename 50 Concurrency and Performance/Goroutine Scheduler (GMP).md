@@ -57,14 +57,14 @@ Diagram ini menunjukkan struktur inti: setiap **P** punya antrean goroutine loka
 
 Jumlah M bisa jauh melebihi jumlah P. Setiap M yang sedang tersangkut di blocking syscall tidak memegang P, jadi ia tidak memakan kuota paralelisme — ia hanya memakan memori stack thread. Ini kenapa program yang banyak memanggil cgo atau operasi file blocking bisa punya jumlah OS thread yang mengejutkan tingginya, tanpa itu berarti ada bug.
 
-**Local run queue vs global run queue**: setiap P punya antrean lokal (kapasitas terbatas, biasanya 256 goroutine) untuk goroutine yang siap dijalankan — mengambil dari antrean lokal jauh lebih murah (tidak butuh lock) dibanding mengambil dari **antrean global** yang dibagikan seluruh P (butuh lock, dipakai saat antrean lokal penuh atau kosong). Desain dua tingkat ini menyeimbangkan kecepatan (antrean lokal, tanpa kontensi) dengan keadilan distribusi beban (antrean global dan work stealing, mencegah satu P kebanjiran sementara yang lain menganggur).
+**Local run queue vs global run queue**: setiap P punya antrean lokal (kapasitasnya 256 goroutine di implementasi runtime saat ini, sebuah detail internal yang bisa berubah) untuk goroutine yang siap dijalankan — mengambil dari antrean lokal jauh lebih murah (tidak butuh lock) dibanding mengambil dari **antrean global** yang dibagikan seluruh P (butuh lock, dipakai saat antrean lokal penuh atau kosong). Desain dua tingkat ini menyeimbangkan kecepatan (antrean lokal, tanpa kontensi) dengan keadilan distribusi beban (antrean global dan work stealing, mencegah satu P kebanjiran sementara yang lain menganggur).
 
-`GOMAXPROCS` bisa diatur eksplisit lewat `runtime.GOMAXPROCS(n)` atau environment variable `GOMAXPROCS` — untuk aplikasi yang berjalan di dalam container Kubernetes dengan **CPU limit** yang lebih kecil dari jumlah core fisik node, penting memastikan `GOMAXPROCS` **sadar** akan limit itu (bukan mengasumsikan seluruh core node tersedia), karena secara default Go membaca jumlah core dari sistem operasi, yang di dalam container bisa saja melaporkan jumlah core **node** (jauh lebih besar dari CPU limit container itu sendiri) — ketidaksesuaian ini bisa membuat Go menjadwalkan lebih banyak P dari yang sebenarnya dialokasikan untuk container itu, memicu overhead penjadwalan yang tidak perlu.
+`GOMAXPROCS` bisa diatur eksplisit lewat `runtime.GOMAXPROCS(n)` atau environment variable `GOMAXPROCS`. Nilai default-nya berubah penting di Go 1.25, dan ini relevan untuk aplikasi di Kubernetes dengan **CPU limit** yang lebih kecil dari jumlah core node:
 
-> [!question] Perlu diverifikasi
-> Klaim: kapasitas antrean lokal per P sekitar 256 goroutine, dan perilaku default GOMAXPROCS terkait cgroup CPU limit di container.
-> Kenapa ragu: ini detail implementasi internal runtime yang bisa berubah antar versi Go, dan sebagian sudah mulai ditangani otomatis lewat `GOMAXPROCS` yang cgroup-aware di rilis Go yang relatif baru — perlu dicek versi mana yang relevan.
-> Cara verifikasi: dokumentasi resmi Go dan changelog rilis mengenai `GOMAXPROCS` dan container awareness.
+- **Modul dengan `go` 1.24 atau lebih rendah di `go.mod`:** default-nya adalah `runtime.NumCPU()`, yaitu jumlah core yang terlihat oleh proses (pada dasarnya core node), bukan CPU limit container. Pod dengan limit 2 core di node 32 core akan mendapat `GOMAXPROCS=32`.
+- **Modul dengan `go` 1.25 atau lebih:** di Linux, runtime ikut membaca kuota CPU cgroup (`cpu.max` di cgroup v2) dan memakai nilai terkecil antara jumlah CPU logis, CPU affinity mask, dan limit cgroup (dibulatkan ke atas, dan tidak kurang dari 2 kecuali mesinnya memang hanya punya 1 CPU). Runtime juga memperbarui nilai itu secara berkala kalau limit berubah. Yang dibaca adalah *CPU limit*, bukan *CPU request*.
+
+Perilaku lama tetap bisa dipaksa lewat `GODEBUG=containermaxprocs=0`. Semua ini dijelaskan di dokumentasi `runtime.GOMAXPROCS`.
 
 ## In Go
 
@@ -85,29 +85,11 @@ func main() {
 }
 ```
 
-```go
-package main
-
-import "runtime"
-
-// Untuk aplikasi di dalam container dengan CPU limit lebih kecil dari
-// core node, pastikan GOMAXPROCS sesuai limit sungguhan — beberapa
-// library (seperti "go.uber.org/automaxprocs") melakukan ini otomatis
-// dengan membaca cgroup, direkomendasikan untuk aplikasi container.
-func init() {
-	// Contoh manual (untuk ilustrasi) — di production sebaiknya pakai
-	// library yang membaca cgroup CPU limit secara otomatis.
-	if limitContainer := bacaLimitDariCgroup(); limitContainer > 0 {
-		runtime.GOMAXPROCS(limitContainer)
-	}
-}
-
-func bacaLimitDariCgroup() int { return 0 } // placeholder ilustrasi
-```
+Untuk modul dengan `go` 1.24 ke bawah yang berjalan di container ber-CPU limit, library `go.uber.org/automaxprocs` (di-import sebagai blank import di `main`) membaca limit cgroup dan menyetel `GOMAXPROCS` sesuai limit itu. Untuk modul Go 1.25+, runtime sudah melakukannya sendiri, dan library itu tidak lagi diperlukan.
 
 ## In His Stack
 
-Untuk aplikasi Go yang di-deploy sebagai pod Kubernetes dengan `resources.limits.cpu` yang jauh lebih kecil dari core node fisik (pola umum di cluster multi-tenant), memakai library seperti `go.uber.org/automaxprocs` yang secara otomatis menyesuaikan `GOMAXPROCS` dengan CPU limit cgroup adalah praktik yang sudah cukup umum direkomendasikan — tanpa ini, Go bisa menjadwalkan lebih banyak P dari yang benar-benar dialokasikan container, menambah overhead penjadwalan yang mengurangi efisiensi CPU yang sudah terbatas.
+Untuk aplikasi Go yang di-deploy sebagai pod Kubernetes dengan `resources.limits.cpu` yang jauh lebih kecil dari core node fisik (pola umum di cluster multi-tenant), langkah pertamanya adalah memeriksa baris `go` di `go.mod`. Kalau nilainya 1.25 atau lebih dan binary dibangun dengan toolchain yang sesuai, `GOMAXPROCS` sudah mengikuti CPU limit secara otomatis. Kalau masih 1.24 ke bawah, pakai `go.uber.org/automaxprocs` atau set environment variable `GOMAXPROCS` di manifest Deployment. Tanpa salah satunya, Go menjadwalkan jauh lebih banyak P dari CPU yang dialokasikan. Akibatnya bukan hanya overhead penjadwalan: CFS quota Linux akan *men-throttle* seluruh container begitu kuotanya habis dalam satu periode, dan throttling itu muncul sebagai lonjakan latency p99 yang sulit dijelaskan.
 
 ## Trade-offs and When Not To Use It
 
@@ -119,7 +101,7 @@ Memahami detail GMP scheduler tidak mengubah cara menulis kode aplikasi sehari-h
 > Menaikkan `GOMAXPROCS` jauh melebihi jumlah core CPU fisik dengan asumsi ini menambah paralelisme — P tidak bisa berjalan paralel melebihi kapasitas core fisik yang benar-benar tersedia; menaikkannya berlebihan hanya menambah overhead koordinasi.
 
 > [!warning] Jebakan
-> Tidak menyesuaikan `GOMAXPROCS` untuk aplikasi yang berjalan di container dengan CPU limit lebih kecil dari core node — Go bisa menjadwalkan lebih banyak P dari yang benar-benar dialokasikan, menyebabkan overhead penjadwalan yang tidak perlu di lingkungan dengan CPU sudah terbatas.
+> Tidak menyesuaikan `GOMAXPROCS` untuk aplikasi Go 1.24 ke bawah yang berjalan di container dengan CPU limit lebih kecil dari core node — Go menjadwalkan lebih banyak P dari CPU yang dialokasikan, dan container terkena CPU throttling. Sebaliknya, jangan menambahkan `automaxprocs` atau `GOMAXPROCS` manual ke modul Go 1.25+ tanpa alasan: nilai manual mematikan pembaruan otomatis dari runtime.
 
 > [!warning] Jebakan
 > Mengasumsikan seluruh goroutine dijadwalkan "adil" tanpa pengecualian — goroutine yang menjalankan komputasi berat tanpa titik jeda tertentu bisa berperilaku berbeda dari yang diharapkan tergantung mekanisme preemption yang berlaku, dibahas lebih lanjut di note berikutnya.
@@ -133,7 +115,7 @@ Memahami detail GMP scheduler tidak mengubah cara menulis kode aplikasi sehari-h
 
 > [!success]- Kunci jawaban
 > **1.** **G** (Goroutine) adalah unit kerja individual — kode yang dijalankan lewat `go func()`, bisa berjumlah ribuan hingga jutaan. **M** (Machine) adalah OS thread sungguhan yang benar-benar dijadwalkan kernel OS untuk mengeksekusi instruksi di CPU. **P** (Processor) adalah konteks penjadwalan logis yang menjembatani keduanya — setiap P punya antrean goroutine lokal, dan tepat satu M yang terpasang padanya pada satu waktu untuk benar-benar mengeksekusi goroutine dari antrean itu. Jumlah P dibatasi `GOMAXPROCS`, memastikan jumlah eksekusi paralel sungguhan sesuai kapasitas hardware.
-> **4.** Tanpa penyesuaian, Go runtime yang membaca jumlah core dari sistem operasi bisa melihat 32 core (core node fisik), bukan 2 core (limit yang sebenarnya dialokasikan container oleh Kubernetes lewat cgroup) — Go kemudian menyetel `GOMAXPROCS` mendekati 32, menjadwalkan jauh lebih banyak P dari yang benar-benar bisa dieksekusi paralel oleh 2 core yang sebenarnya dialokasikan. Ini menambah overhead penjadwalan (context switching antar P yang lebih banyak dari kapasitas riil) tanpa manfaat paralelisme tambahan, memboroskan sedikit dari 2 core yang sudah terbatas itu untuk overhead yang tidak perlu. Solusi: memakai library seperti `go.uber.org/automaxprocs` (diimpor dan dipanggil di awal `main()`) yang secara otomatis membaca CPU limit dari cgroup dan menyetel `GOMAXPROCS` sesuai limit sungguhan (2, dalam kasus ini), bukan jumlah core node yang menyesatkan.
+> **4.** Jawabannya bergantung pada versi Go di `go.mod`. Untuk Go 1.24 ke bawah, runtime melihat 32 core node dan menyetel `GOMAXPROCS=32`, padahal container hanya boleh memakai rata-rata 2 core. Hingga 32 goroutine bisa berjalan paralel, sehingga kuota CPU container habis di awal setiap periode CFS dan seluruh container di-throttle sampai periode berikutnya, yang terlihat sebagai lonjakan latency periodik. Solusinya: `go.uber.org/automaxprocs`, environment variable `GOMAXPROCS=2` di manifest, atau (paling bersih) menaikkan versi `go` di `go.mod` ke 1.25+, di mana runtime membaca limit cgroup sendiri dan memperbaruinya kalau limit berubah.
 
 ## Self-Check
 
@@ -146,7 +128,7 @@ Memahami detail GMP scheduler tidak mengubah cara menulis kode aplikasi sehari-h
 
 - [[Goroutines]] — model GMP adalah mekanisme konkret di balik klaim "goroutine dijadwalkan runtime, bukan OS" yang diperkenalkan di note itu.
 - [[Preemption]] — kelanjutan langsung: bagaimana scheduler menangani goroutine yang tidak kooperatif (komputasi berat tanpa jeda), dibahas di note berikutnya.
-- [[Goroutine Leaks]] — goroutine yang bocor tetap "hidup" dalam struktur GMP ini, terus menempati slot antrean meski tidak pernah selesai.
+- [[Goroutine Leaks]] — goroutine yang bocor tidak menempati run queue (goroutine yang terblokir diparkir di antrean tunggu channel atau lock), tapi stack dan objek yang direferensikannya tetap hidup; itulah kenapa leak memakan memori, bukan CPU.
 - [[Worker Pools]] — jumlah worker optimal untuk pekerjaan CPU-bound yang dibahas di note itu bertumpu langsung pada pemahaman GOMAXPROCS dan jumlah P yang dijelaskan di sini.
 - [[Garbage Collection in Go]] — GC Go berjalan berdampingan dengan goroutine aplikasi dalam struktur GMP yang sama, berkoordinasi lewat mekanisme yang terkait dengan scheduler ini.
 

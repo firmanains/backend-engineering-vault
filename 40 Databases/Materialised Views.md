@@ -63,11 +63,26 @@ REFRESH MATERIALIZED VIEW ringkasan_permohonan_bulanan;
 REFRESH MATERIALIZED VIEW CONCURRENTLY ringkasan_permohonan_bulanan;
 ```
 
-MySQL/MariaDB tidak punya sintaks `MATERIALIZED VIEW` native — pola yang setara biasanya diimplementasikan manual lewat tabel biasa yang diisi ulang secara terjadwal (event scheduler atau cron job eksternal yang menjalankan `INSERT ... SELECT` atau `REPLACE INTO`), memberi hasil fungsional yang sama tapi tanpa dukungan sintaksis bawaan seperti `REFRESH CONCURRENTLY`.
+MySQL/MariaDB tidak punya sintaks `MATERIALIZED VIEW` native. Pola yang setara diimplementasikan manual lewat tabel biasa yang diisi ulang secara terjadwal (event scheduler atau cron job). Cara mengisi ulangnya penting. `TRUNCATE` lalu `INSERT ... SELECT` meninggalkan jendela waktu di mana dashboard membaca tabel kosong atau setengah terisi. Cara yang aman adalah membangun tabel baru di samping, lalu menukarnya sekaligus:
+
+```sql
+-- MariaDB: bangun hasil baru tanpa menyentuh tabel yang sedang dibaca
+CREATE TABLE ringkasan_permohonan_bulanan_baru LIKE ringkasan_permohonan_bulanan;
+INSERT INTO ringkasan_permohonan_bulanan_baru (provinsi, status, bulan, jumlah)
+SELECT provinsi, status, DATE_FORMAT(tanggal_dibuat, '%Y-%m-01'), COUNT(*)
+FROM permohonan
+GROUP BY provinsi, status, DATE_FORMAT(tanggal_dibuat, '%Y-%m-01');
+
+-- RENAME TABLE dengan beberapa pasangan berjalan atomik:
+-- pembaca melihat versi lama atau versi baru, tidak pernah keduanya.
+RENAME TABLE ringkasan_permohonan_bulanan TO ringkasan_permohonan_bulanan_lama,
+             ringkasan_permohonan_bulanan_baru TO ringkasan_permohonan_bulanan;
+DROP TABLE ringkasan_permohonan_bulanan_lama;
+```
 
 ## Under The Hood
 
-`REFRESH MATERIALIZED VIEW` biasa di PostgreSQL mengunci view dari pembacaan **selama** proses refresh berlangsung — untuk view yang refresh-nya butuh waktu lama (agregasi berat terhadap tabel besar), ini berarti jendela waktu di mana dashboard yang bergantung padanya tidak bisa diakses sama sekali. `REFRESH MATERIALIZED VIEW CONCURRENTLY` menyelesaikan ini dengan membangun versi baru di latar belakang dan menukarnya secara atomik begitu selesai (mirip strategi blue-green di level yang jauh lebih kecil), tapi butuh **unique index** pada materialised view itu sendiri sebagai prasyarat teknis, dan secara mekanis lebih mahal (butuh menyimpan dua versi sesaat) dibanding refresh biasa.
+`REFRESH MATERIALIZED VIEW` biasa di PostgreSQL mengunci view dari pembacaan **selama** proses refresh berlangsung — untuk view yang refresh-nya butuh waktu lama (agregasi berat terhadap tabel besar), ini berarti jendela waktu di mana dashboard yang bergantung padanya tidak bisa diakses sama sekali. `REFRESH MATERIALIZED VIEW CONCURRENTLY` menyelesaikan ini dengan cara berbeda: ia menghitung hasil baru ke tabel sementara, membandingkannya dengan isi view saat ini, lalu menerapkan selisihnya (`INSERT`, `UPDATE`, `DELETE`) baris per baris. Pembaca tetap bisa membaca view selama proses itu. Perbandingan baris per baris itulah alasan **unique index** pada view menjadi prasyarat: tanpa kunci unik, PostgreSQL tidak bisa mencocokkan baris lama dengan baris baru. Konsekuensinya, `CONCURRENTLY` lebih lambat dari refresh biasa, terutama kalau sebagian besar baris berubah di setiap refresh.
 
 Pilihan strategi refresh — **penuh** (menghitung ulang seluruh view dari nol setiap kali) vs **inkremental** (hanya memperbarui bagian yang datanya berubah sejak refresh terakhir) — adalah trade-off kompleksitas vs efisiensi: refresh penuh sederhana diimplementasikan tapi biayanya tetap sama besar berapa pun kecil perubahan datanya; refresh inkremental jauh lebih efisien untuk perubahan kecil tapi butuh mekanisme tambahan (seperti change data capture, disinggung di [[../60 Distributed Systems/Change Data Capture|Change Data Capture]] level senior) untuk melacak baris mana saja yang berubah sejak refresh terakhir — PostgreSQL native tidak mendukung refresh inkremental otomatis untuk materialised view standarnya, sehingga pola inkremental biasanya diimplementasikan manual atau lewat tooling tambahan.
 
@@ -110,13 +125,14 @@ func JadwalkanRefreshRingkasan(ctx context.Context, db *sql.DB, logger *slog.Log
 	}
 }
 
-// AmbilRingkasanDashboard membaca dari materialised view — secepat
-// membaca tabel biasa, TANPA menjalankan ulang agregasi mahal.
+// AmbilRingkasanDashboard membaca dari materialised view: secepat membaca
+// tabel biasa, tanpa menjalankan ulang agregasi. Placeholder $1 karena
+// materialised view ini fitur PostgreSQL.
 func AmbilRingkasanDashboard(ctx context.Context, db *sql.DB, provinsi string) (*sql.Rows, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT status, bulan, jumlah
 		FROM ringkasan_permohonan_bulanan
-		WHERE provinsi = ?
+		WHERE provinsi = $1
 		ORDER BY bulan DESC
 	`, provinsi)
 	if err != nil {
@@ -154,7 +170,7 @@ Materialised view tidak cocok untuk data yang butuh akurasi real-time ketat — 
 
 > [!success]- Kunci jawaban
 > **1.** View biasa adalah "query tersimpan" — nama untuk sebuah query, dijalankan ulang penuh dari sumber data setiap kali dibaca, sehingga waktu bacanya identik dengan menjalankan query mentahnya langsung. Materialised view menyimpan **hasil** query itu secara fisik seperti tabel — membaca materialised view berarti membaca data yang sudah dihitung sebelumnya, secepat membaca tabel biasa, tanpa menjalankan ulang agregasi apa pun. Hanya materialised view yang menyelesaikan masalah "komputasi mahal dijalankan berulang setiap dibaca", karena view biasa justru tetap menjalankan komputasi mahal itu setiap kali, hanya dengan sintaks yang lebih ringkas ditulis.
-> **4.** Frekuensi refresh yang wajar: setiap 15-30 menit selama jam kerja (menyeimbangkan kesegaran data dengan beban refresh berulang), mungkin lebih jarang di luar jam kerja. Refresh penuh kemungkinan tetap cukup untuk kebanyakan kasus ukuran ini, kecuali volume data sudah sangat besar sehingga refresh penuh sendiri butuh waktu lama — di titik itu, mempertimbangkan pendekatan inkremental (butuh tooling tambahan di luar PostgreSQL native) baru sepadan. Selalu pakai `REFRESH CONCURRENTLY` supaya dashboard tetap bisa diakses selama proses refresh berjalan, bukan `REFRESH` biasa yang mengunci pembacaan. Untuk komunikasi ke pengguna: tampilkan eksplisit "Data per [waktu refresh terakhir]" di dashboard (bisa diambil dari kolom timestamp yang disimpan sebagai bagian dari hasil materialised view, atau dari metadata refresh terpisah) — ini mengubah ekspektasi pengguna dari "kenapa datanya salah" menjadi "oh, ini snapshot beberapa menit lalu", perbedaan yang sepenuhnya soal komunikasi, bukan soal teknis semata.
+> **4.** Frekuensi refresh yang wajar: setiap 15-30 menit selama jam kerja (menyeimbangkan kesegaran data dengan beban refresh berulang), mungkin lebih jarang di luar jam kerja. Refresh penuh kemungkinan tetap cukup untuk kebanyakan kasus ukuran ini, kecuali volume data sudah sangat besar sehingga refresh penuh sendiri butuh waktu lama — di titik itu, mempertimbangkan pendekatan inkremental (butuh tooling tambahan di luar PostgreSQL native) baru sepadan. Untuk dashboard yang diakses terus-menerus, pakai `REFRESH CONCURRENTLY` supaya dashboard tetap bisa dibaca selama refresh berjalan, dengan menerima bahwa refresh-nya sendiri lebih lambat. Untuk komunikasi ke pengguna: tampilkan eksplisit "Data per [waktu refresh terakhir]" di dashboard (bisa diambil dari kolom timestamp yang disimpan sebagai bagian dari hasil materialised view, atau dari metadata refresh terpisah) — ini mengubah ekspektasi pengguna dari "kenapa datanya salah" menjadi "oh, ini snapshot beberapa menit lalu", perbedaan yang sepenuhnya soal komunikasi, bukan soal teknis semata.
 
 ## Self-Check
 

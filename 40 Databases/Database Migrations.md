@@ -49,6 +49,8 @@ flowchart LR
     C -.->|"rollback: 000012_down.sql"| B
 ```
 
+Satu perbedaan dialek yang sangat berpengaruh di sini: di MySQL/MariaDB, DDL (`ALTER TABLE`, `CREATE TABLE`) **tidak transactional** dan memicu commit implisit. Migration yang berisi tiga statement lalu gagal di statement kedua meninggalkan skema setengah jadi, dan tool seperti `golang-migrate` menandai versinya sebagai *dirty* sampai seseorang memperbaikinya manual. PostgreSQL mendukung DDL di dalam transaction, jadi migration yang gagal bisa di-rollback utuh. Karena itu, di MariaDB, buat setiap file migration sekecil mungkin (idealnya satu perubahan DDL per file).
+
 Diagram ini menunjukkan migration sebagai urutan langkah linear — setiap environment (lokal, staging, produksi) pada akhirnya harus berada di titik yang sama di garis ini, dicapai dengan menjalankan urutan migration yang identik, bukan lewat perubahan manual yang tidak tercatat di mana pun dalam urutan ini.
 
 ## In Go
@@ -57,6 +59,7 @@ Diagram ini menunjukkan migration sebagai urutan langkah linear — setiap envir
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -74,7 +77,7 @@ func JalankanMigrasi(dsn, pathMigrasi string) error {
 	}
 	defer m.Close()
 
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("jalankan migrasi: %w", err)
 	}
 	return nil

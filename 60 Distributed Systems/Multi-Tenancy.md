@@ -103,9 +103,12 @@ func (r *TenantScopedRepository) FindCases(ctx context.Context) ([]string, error
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("multitenancy: scan baris kasus: %w", err)
 		}
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("multitenancy: iterasi baris kasus: %w", err)
 	}
 	return ids, nil
 }

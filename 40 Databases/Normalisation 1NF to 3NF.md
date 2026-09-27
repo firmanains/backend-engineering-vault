@@ -43,7 +43,11 @@ Analogi ini bocor pada satu hal: "satu rumah, satu fakta" terdengar seperti prin
 CREATE TABLE permohonan (id INT, judul VARCHAR(255), tag VARCHAR(255)); -- tag = "urgent,legal,pending"
 
 -- Mematuhi 1NF: tabel terpisah untuk relasi satu-ke-banyak
-CREATE TABLE permohonan_tag (permohonan_id INT, tag VARCHAR(50));
+CREATE TABLE permohonan_tag (
+    permohonan_id INT NOT NULL,
+    tag VARCHAR(50) NOT NULL,
+    PRIMARY KEY (permohonan_id, tag) -- mencegah tag yang sama tercatat dua kali
+);
 ```
 
 **2NF — hanya relevan untuk primary key komposit.** Setiap kolom non-key harus bergantung pada **seluruh** primary key, bukan sebagian. Pelanggaran umum: tabel dengan primary key `(permohonan_id, petugas_id)`, tapi punya kolom `nama_petugas` yang sebenarnya hanya bergantung pada `petugas_id` saja, bukan kombinasi keduanya.
@@ -72,7 +76,7 @@ Setiap tahap adalah syarat untuk tahap berikutnya — sebuah tabel tidak bisa di
 Normalisasi adalah keputusan desain skema, bukan sesuatu yang "ditulis" di kode Go — tapi bentuknya langsung memengaruhi bentuk struct dan query yang dibutuhkan:
 
 ```go
-package main
+package repository
 
 import (
 	"context"
@@ -133,7 +137,7 @@ Normalisasi penuh (3NF dan seterusnya) meminimalkan update anomaly dan duplikasi
 
 > [!success]- Kunci jawaban
 > **1.** Ini pelanggaran 3NF: `harga_satuan_saat_ini` bergantung pada `produk`, bukan langsung pada primary key `id` pesanan — kalau harga produk berubah, kolom ini akan (atau seharusnya) ikut berubah untuk pesanan lama, padahal pesanan lama seharusnya mencatat harga **pada saat pesanan dibuat**, bukan harga sekarang. Perbaikannya bergantung maksud sebenarnya: kalau memang harus mencatat harga saat itu (snapshot), namanya harus diubah jadi `harga_satuan_saat_pesanan` dan itu justru **benar** disimpan langsung di tabel `pesanan` (bukan pelanggaran, karena nilainya memang milik baris pesanan itu, bukan bergantung pada `produk` saat ini); kalau memang dimaksudkan selalu mengikuti harga terkini produk, kolom itu harus dihapus dan diganti `JOIN` ke tabel `produk`.
-> **4.** Ini justru desain yang **tepat** untuk log audit, bukan pelanggaran 3NF yang perlu diperbaiki. `log_perubahan_status` mencatat fakta historis "pada waktu ini, petugas dengan nama dan jabatan ini yang melakukan perubahan" — nama dan jabatan petugas **pada saat kejadian** adalah bagian dari fakta historis itu sendiri, bukan referensi ke keadaan petugas saat ini. Kalau nama atau jabatan petugas menyimpan `petugas_id` lalu di-`JOIN` ke tabel `pegawai` untuk laporan, hasilnya akan menampilkan jabatan **saat ini**, bukan jabatan pada saat kejadian — merusak akurasi audit trail kalau petugas tersebut sejak itu naik jabatan atau pindah unit. Ini contoh langsung dari analogi "leak" di bagian Intuition: normalisasi ketat kadang justru salah untuk data yang secara sengaja berupa snapshot historis.
+> **4.** Ini justru desain yang **tepat** untuk log audit, bukan pelanggaran 3NF yang perlu diperbaiki. `log_perubahan_status` mencatat fakta historis "pada waktu ini, petugas dengan nama dan jabatan ini yang melakukan perubahan" — nama dan jabatan petugas **pada saat kejadian** adalah bagian dari fakta historis itu sendiri, bukan referensi ke keadaan petugas saat ini. Kalau nama atau jabatan petugas menyimpan `petugas_id` lalu di-`JOIN` ke tabel `pegawai` untuk laporan, hasilnya akan menampilkan jabatan **saat ini**, bukan jabatan pada saat kejadian — merusak akurasi audit trail kalau petugas tersebut sejak itu naik jabatan atau pindah unit. Ini contoh langsung dari analogi "leak" di bagian Intuition: normalisasi ketat kadang justru salah untuk data yang secara sengaja berupa snapshot historis. Satu perbaikan tetap perlu: tambahkan `petugas_id` di samping snapshot nama dan jabatan. Nama bukan identitas yang unik (dua petugas bisa bernama sama, dan nama bisa dikoreksi), sehingga audit yang hanya menyimpan string nama tidak bisa membuktikan **siapa** pelakunya. Desain yang tepat untuk compliance menyimpan keduanya: ID yang stabil untuk identitas, dan snapshot nama/jabatan untuk konteks pada saat kejadian.
 
 ## Self-Check
 

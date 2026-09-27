@@ -50,7 +50,7 @@ Pola kegagalan yang berulang di seluruh delapan fallacy ini sama: asumsi yang ti
 
 ## Under The Hood
 
-Fallacy-fallacy ini pertama kali dikumpulkan sebagai daftar informal oleh sejumlah insinyur di Sun Microsystems (paling sering dikaitkan dengan nama Peter Deutsch dan kontributor lain di perusahaan yang sama) pada era 1990-an, dari pengalaman langsung membangun sistem terdistribusi awal. Nilainya bukan sebagai daftar lengkap segala hal yang bisa salah — ia adalah daftar **asumsi paling umum** yang secara konsisten menjebak engineer berpengalaman sekalipun, justru karena asumsi itu benar cukup sering untuk terasa aman dipercaya begitu saja.
+Fallacy-fallacy ini dikumpulkan sebagai daftar informal oleh insinyur di Sun Microsystems pada era 1990-an, dari pengalaman langsung membangun sistem terdistribusi awal. Tujuh yang pertama paling sering dikaitkan dengan L. Peter Deutsch (sekitar 1994), dan yang kedelapan (jaringan itu homogen) biasanya dikaitkan dengan James Gosling beberapa tahun kemudian; atribusi persisnya berasal dari sejarah lisan komunitas, bukan satu publikasi resmi. Nilainya bukan sebagai daftar lengkap segala hal yang bisa salah — ia adalah daftar **asumsi paling umum** yang secara konsisten menjebak engineer berpengalaman sekalipun, justru karena asumsi itu benar cukup sering untuk terasa aman dipercaya begitu saja.
 
 Poin yang sering luput: kedelapan fallacy ini bukan alasan untuk paranoid terhadap setiap panggilan jaringan sampai melumpuhkan produktivitas — tujuannya adalah membuat asumsi itu **eksplisit dan sadar**, bukan diam-diam ada di kode tanpa pernah dipertimbangkan. Sistem yang secara sadar memutuskan "kami menerima risiko latency jaringan internal karena riwayatnya sangat stabil" berbeda jauh dari sistem yang tidak pernah memikirkan kemungkinan itu sama sekali.
 
@@ -62,15 +62,15 @@ package resilience
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
 
-// CallService menunjukkan kode yang SECARA SADAR menolak asumsi
-// fallacy #1 dan #2 (jaringan andal, latency nol) — timeout eksplisit
-// dan penanganan kegagalan yang tidak berasumsi panggilan pasti sukses.
-func CallService(ctx context.Context, url string) (*http.Response, error) {
-	// Timeout eksplisit: MENOLAK asumsi "latency-nya nol".
+// CallService secara sadar menolak fallacy #1 dan #2 (jaringan andal,
+// latency nol): timeout eksplisit, dan kegagalan dianggap kondisi normal.
+func CallService(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+	// Timeout eksplisit: menolak asumsi "latency-nya nol".
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
@@ -79,14 +79,27 @@ func CallService(ctx context.Context, url string) (*http.Response, error) {
 		return nil, fmt.Errorf("resilience: membuat request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		// MENOLAK asumsi "jaringan itu andal" — kegagalan panggilan
-		// adalah kondisi yang DIHARAPKAN bisa terjadi, bukan kejutan
-		// yang tidak ditangani.
-		return nil, fmt.Errorf("resilience: panggilan gagal (jaringan tidak selalu andal): %w", err)
+		// Menolak asumsi "jaringan itu andal": kegagalan panggilan adalah
+		// kondisi yang diharapkan bisa terjadi, bukan kejutan.
+		return nil, fmt.Errorf("resilience: panggilan ke %s gagal: %w", url, err)
 	}
-	return resp, nil
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("resilience: %s mengembalikan status %d", url, resp.StatusCode)
+	}
+
+	// Body dibaca DI DALAM fungsi ini. Mengembalikan *http.Response ke
+	// pemanggil adalah bug: defer cancel() membatalkan context begitu fungsi
+	// kembali, dan pembacaan body di pemanggil gagal dengan "context canceled".
+	// LimitReader menolak fallacy #3 (bandwidth tak terbatas).
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("resilience: membaca respons %s: %w", url, err)
+	}
+	return body, nil
 }
 ```
 

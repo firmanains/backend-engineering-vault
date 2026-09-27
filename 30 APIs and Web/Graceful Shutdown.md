@@ -57,7 +57,9 @@ func main() {
     // bebas menunggu sinyal shutdown.
     serverErr := make(chan error, 1)
     go func() {
-        if err := srv.ListenAndServe(); err != nil {
+        // ErrServerClosed adalah hasil yang DIHARAPKAN setelah Shutdown,
+        // bukan kegagalan — hanya error lain yang diteruskan.
+        if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
             serverErr <- err
         }
     }()
@@ -71,6 +73,13 @@ func main() {
         log.Fatalf("server gagal berjalan: %v", err)
     case sig := <-sigCh:
         log.Printf("menerima sinyal %v, mulai graceful shutdown", sig)
+
+        // Di Kubernetes, penghapusan pod dari daftar endpoint menyebar ke
+        // kube-proxy dan ingress secara ASINKRON. Selama beberapa detik
+        // setelah SIGTERM, trafik baru masih bisa datang. Jeda singkat ini
+        // (atau preStop hook yang setara) mencegah koneksi baru ditolak
+        // karena listener sudah terlanjur ditutup.
+        time.Sleep(5 * time.Second)
 
         // Beri waktu wajar untuk request yang sedang berjalan selesai —
         // HARUS lebih pendek dari terminationGracePeriodSeconds Kubernetes,
@@ -87,11 +96,13 @@ func main() {
 }
 ```
 
-Catatan penting: `srv.ListenAndServe()` **selalu** mengembalikan error setelah server berhenti — tapi kalau berhentinya karena `Shutdown` dipanggil dengan sengaja (bukan kegagalan tak terduga), error yang dikembalikan adalah `http.ErrServerClosed`, yang **diharapkan**, bukan kondisi gagal yang perlu dianggap fatal. Kode di atas menghindari menganggap ini error dengan tidak memeriksa `err` dari goroutine `ListenAndServe` sebagai fatal setelah shutdown sengaja dipicu (logic penanganan `http.ErrServerClosed` secara eksplisit sebaiknya ditambahkan di produksi nyata untuk membedakan dari kegagalan startup yang sesungguhnya).
+Catatan penting: `srv.ListenAndServe()` **selalu** mengembalikan error setelah server berhenti — tapi kalau berhentinya karena `Shutdown` dipanggil dengan sengaja (bukan kegagalan tak terduga), error yang dikembalikan adalah `http.ErrServerClosed`, yang **diharapkan**, bukan kondisi gagal yang perlu dianggap fatal. Kode di atas memisahkannya secara eksplisit lewat `errors.Is`, sehingga hanya kegagalan sungguhan (misalnya port sudah dipakai saat startup) yang sampai ke `serverErr`.
+
+Jeda `time.Sleep` sebelum `Shutdown` bukan kebiasaan buruk yang lupa dihapus. Ia menutup celah balapan yang nyata di Kubernetes: pod yang menerima `SIGTERM` dihapus dari daftar endpoint, tapi perubahan itu butuh waktu untuk sampai ke semua kube-proxy dan ingress controller. Tanpa jeda, ada jendela singkat di mana trafik baru masih diarahkan ke pod yang listener-nya sudah tertutup. Jeda ini ikut memakan `terminationGracePeriodSeconds`, jadi jumlahkan keduanya saat menyelaraskan timeout.
 
 ## In His Stack
 
-**Kubernetes** mengirim `SIGTERM` lalu menunggu `terminationGracePeriodSeconds` (dikonfigurasi per pod) sebelum akhirnya mengirim `SIGKILL` paksa kalau process belum juga keluar. Timeout shutdown di level aplikasi (`20 * time.Second` di contoh di atas) **harus** diset lebih pendek dari `terminationGracePeriodSeconds` Kubernetes — kalau lebih panjang atau sama, Kubernetes akan mengirim `SIGKILL` sebelum `Shutdown` sempat selesai dengan bersih, membuat seluruh mekanisme graceful shutdown ini sia-sia karena tetap dipotong paksa di akhir.
+**Kubernetes** mengirim `SIGTERM` lalu menunggu `terminationGracePeriodSeconds` (dikonfigurasi per pod) sebelum akhirnya mengirim `SIGKILL` paksa kalau process belum juga keluar. Total jeda awal plus timeout shutdown di level aplikasi (`5 + 20` detik di contoh di atas) **harus** lebih pendek dari `terminationGracePeriodSeconds` Kubernetes — kalau lebih panjang atau sama, Kubernetes akan mengirim `SIGKILL` sebelum `Shutdown` sempat selesai dengan bersih, membuat seluruh mekanisme graceful shutdown ini sia-sia karena tetap dipotong paksa di akhir.
 
 ## Trade-offs and When Not To Use It
 
@@ -116,7 +127,7 @@ Graceful shutdown menambah sedikit boilerplate (signal handling, koordinasi goro
 4. Desain terbuka: sebuah tim menemukan bahwa setiap deployment rutin (beberapa kali seminggu) selalu disertai laporan kecil dari user soal "request gagal sesaat", dan menduga ini terkait proses deployment, bukan bug aplikasi biasa. Rancang investigasi untuk mengonfirmasi dugaan ini, dan perbaikan lengkap yang perlu diterapkan.
 
 > [!success]- Kunci jawaban
-> Investigasi: korelasikan waktu laporan kegagalan user dengan timestamp deployment dari sistem CI/CD — kalau polanya konsisten berbarengan dengan momen rolling update, ini konfirmasi kuat penyebabnya adalah shutdown yang tidak graceful. Periksa kode server: apakah ada penanganan sinyal `SIGTERM` sama sekali, dan apakah `srv.Shutdown(ctx)` dipanggil dengan timeout yang wajar. Periksa juga konfigurasi Kubernetes: apakah `terminationGracePeriodSeconds` sudah diset cukup panjang dan lebih besar dari timeout shutdown aplikasi. Perbaikan lengkap: implementasikan signal handling dan `Shutdown` seperti contoh kode di atas, selaraskan kedua nilai timeout (aplikasi harus lebih pendek dari Kubernetes), dan pertimbangkan juga menambahkan **readiness probe** yang segera menandai pod sebagai "tidak siap" begitu sinyal shutdown diterima — supaya load balancer/Service Kubernetes berhenti mengirim trafik baru ke pod itu bahkan sebelum listener aplikasi sendiri benar-benar berhenti menerima koneksi, memberi jeda tambahan yang lebih aman.
+> Investigasi: korelasikan waktu laporan kegagalan user dengan timestamp deployment dari sistem CI/CD — kalau polanya konsisten berbarengan dengan momen rolling update, ini konfirmasi kuat penyebabnya adalah shutdown yang tidak graceful. Periksa kode server: apakah ada penanganan sinyal `SIGTERM` sama sekali, dan apakah `srv.Shutdown(ctx)` dipanggil dengan timeout yang wajar. Periksa juga konfigurasi Kubernetes: apakah `terminationGracePeriodSeconds` sudah diset cukup panjang dan lebih besar dari timeout shutdown aplikasi. Perbaikan lengkap: implementasikan signal handling dan `Shutdown` seperti contoh kode di atas, selaraskan kedua nilai timeout (aplikasi harus lebih pendek dari Kubernetes), dan tambahkan jeda singkat sebelum `Shutdown` (atau `preStop` hook berisi `sleep`) supaya pod tetap menerima koneksi selama penghapusannya dari daftar endpoint menyebar ke kube-proxy dan ingress. Pod yang sedang terminating memang otomatis dikeluarkan dari endpoint, tapi penyebaran perubahan itu asinkron. Membuat readiness probe gagal saat shutdown tidak mempercepat penyebaran itu, jadi yang dibutuhkan adalah jeda, bukan sekadar probe.
 
 ## Self-Check
 

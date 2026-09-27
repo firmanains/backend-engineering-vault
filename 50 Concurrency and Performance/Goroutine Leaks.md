@@ -14,7 +14,7 @@ created: 2026-07-29
 
 ## TL;DR
 
-Goroutine yang diluncurkan tapi tidak pernah selesai — terjebak menunggu channel yang tidak akan pernah menerima/mengirim, atau menunggu context yang tidak pernah dibatalkan — tidak hilang begitu saja. Ia terus hidup, memakai memori stack-nya, selamanya, sampai proses aplikasi di-restart. Goroutine leak adalah salah satu bug performa paling berbahaya di Go justru karena **tidak menyebabkan crash langsung** — aplikasi terus berjalan normal, hanya jumlah goroutine dan penggunaan memori terus **merayap naik** dari waktu ke waktu, sampai akhirnya (setelah jam, hari, atau minggu) benar-benar kehabisan memori dan crash — pada titik yang jauh dari kode yang sebenarnya menjadi akar masalah.
+Goroutine yang diluncurkan tapi tidak pernah selesai — terjebak menunggu channel yang tidak akan pernah menerima/mengirim, atau menunggu context yang tidak pernah dibatalkan — tidak hilang begitu saja. Ia terus hidup sampai proses aplikasi di-restart, memakai memori stack-nya **dan** menahan semua objek heap yang direferensikannya (buffer, response, koneksi) dari garbage collector. Goroutine leak adalah salah satu bug performa paling berbahaya di Go justru karena **tidak menyebabkan crash langsung** — aplikasi terus berjalan normal, hanya jumlah goroutine dan penggunaan memori terus **merayap naik** dari waktu ke waktu, sampai akhirnya (setelah jam, hari, atau minggu) benar-benar kehabisan memori dan crash — pada titik yang jauh dari kode yang sebenarnya menjadi akar masalah.
 
 ## The Problem
 
@@ -35,7 +35,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"time"
 )
 
@@ -96,9 +95,9 @@ Diagram ini menunjukkan perbaikan paling sederhana untuk kasus spesifik ini — 
 
 ## Under The Hood
 
-**Penyebab paling umum goroutine leak**: (1) mengirim/menerima dari channel unbuffered tanpa `select` + `ctx.Done()` sebagai jalan keluar, persis kasus di atas; (2) goroutine yang menunggu `WaitGroup` yang tidak pernah mencapai nol karena salah satu `Done()` lupa dipanggil (biasanya karena panic yang tidak tertangani sebelum sempat memanggil `defer wg.Done()` — meski `defer` sendiri seharusnya tetap jalan bahkan saat panic, kecuali panic terjadi sebelum defer itu didaftarkan); (3) goroutine worker yang menunggu channel job yang tidak pernah ditutup, padahal seharusnya sudah tidak ada job lagi yang akan datang.
+**Penyebab paling umum goroutine leak**: (1) mengirim/menerima dari channel unbuffered tanpa `select` + `ctx.Done()` sebagai jalan keluar, persis kasus di atas; (2) goroutine yang menunggu `WaitGroup` yang tidak pernah mencapai nol, biasanya karena jumlah `Add()` tidak cocok dengan jumlah `Done()`: ada jalur return awal yang melewatkan `Done()` karena tidak memakai `defer wg.Done()`, atau `Add()` dipanggil lebih banyak dari goroutine yang benar-benar diluncurkan; (3) goroutine worker yang menunggu channel job yang tidak pernah ditutup, padahal seharusnya sudah tidak ada job lagi yang akan datang.
 
-**Mendeteksi goroutine leak** paling langsung lewat `runtime.NumGoroutine()` yang dipantau sebagai metrik dari waktu ke waktu — angka yang terus naik tanpa pernah turun kembali ke baseline (bahkan saat traffic sedang sepi) adalah sinyal kuat ada goroutine yang bocor di suatu tempat. Untuk debugging lebih detail, `pprof` (dibahas di [[pprof Profiling]]) menyediakan **goroutine profile** yang menunjukkan **stack trace** setiap goroutine yang sedang hidup, termasuk di baris kode mana masing-masing sedang menunggu — informasi yang sangat berharga untuk menemukan persis goroutine mana yang bocor dan kenapa.
+**Mendeteksi goroutine leak** paling langsung lewat `runtime.NumGoroutine()` yang dipantau sebagai metrik dari waktu ke waktu — angka yang terus naik tanpa pernah turun kembali ke baseline (bahkan saat traffic sedang sepi) adalah sinyal kuat ada goroutine yang bocor di suatu tempat. Leak juga bisa ditangkap lebih awal, di level test: library `go.uber.org/goleak` memeriksa apakah masih ada goroutine yang hidup ketika sebuah test selesai (`defer goleak.VerifyNone(t)`), sehingga fungsi yang meninggalkan goroutine menggantung langsung gagal di CI. Untuk debugging lebih detail, `pprof` (dibahas di [[pprof Profiling]]) menyediakan **goroutine profile** yang menunjukkan **stack trace** setiap goroutine yang sedang hidup, termasuk di baris kode mana masing-masing sedang menunggu — informasi yang sangat berharga untuk menemukan persis goroutine mana yang bocor dan kenapa.
 
 ## In Go
 
@@ -128,11 +127,15 @@ func PantauJumlahGoroutine() {
 func main() {
 	go PantauJumlahGoroutine()
 
-	// endpoint pprof (termasuk goroutine profile) otomatis tersedia di
-	// /debug/pprof/ begitu package net/http/pprof di-import — akses
-	// /debug/pprof/goroutine?debug=2 untuk melihat stack trace SETIAP
-	// goroutine yang sedang hidup.
-	http.ListenAndServe(":6060", nil)
+	// Endpoint pprof (termasuk goroutine profile) otomatis terdaftar di
+	// DefaultServeMux begitu net/http/pprof di-import. Akses
+	// /debug/pprof/goroutine?debug=2 untuk melihat stack trace setiap
+	// goroutine yang sedang hidup. Dengarkan hanya di localhost (atau
+	// jaringan internal): profil membocorkan detail internal aplikasi dan
+	// bisa dipakai untuk membebani CPU kalau terbuka ke publik.
+	if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+		fmt.Println("server pprof berhenti:", err)
+	}
 }
 ```
 

@@ -59,6 +59,7 @@ package integrasi
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -66,22 +67,23 @@ import (
 // bisa jalan) dari verifikasi eksternal (BISA TERTUNDA tanpa
 // menghalangi proses inti).
 func AjukanPermohonan(ctx context.Context, data DataPermohonan, antreanVerifikasi chan<- int64) (int64, error) {
-	// LANGKAH KRITIS: simpan permohonan — TIDAK bergantung pada partner
-	// eksternal sama sekali, SELALU bisa berhasil terlepas kondisi partner.
+	// LANGKAH KRITIS: simpan permohonan dengan status "menunggu_verifikasi".
+	// Langkah ini TIDAK bergantung pada partner eksternal sama sekali.
+	// Status di database inilah sumber kebenaran pekerjaan yang tertunda,
+	// BUKAN channel di bawah.
 	id, err := simpanPermohonan(ctx, data)
 	if err != nil {
 		return 0, fmt.Errorf("simpan permohonan: %w", err)
 	}
 
-	// LANGKAH OPSIONAL: verifikasi NIK dimasukkan ke ANTREAN, BUKAN
-	// dipanggil langsung — kalau partner sedang down, permohonan TETAP
-	// tersimpan dengan status "menunggu verifikasi", tidak menghalangi
-	// warga mengajukan permohonan sama sekali.
+	// LANGKAH OPSIONAL: beri tahu worker lewat channel supaya verifikasi
+	// bisa dimulai cepat. Kalau channel penuh (atau process mati sebelum
+	// worker sempat memprosesnya), tidak ada yang hilang: penyapu berkala
+	// (SapuVerifikasiTertunda) akan menemukan permohonan ini dari statusnya.
 	select {
 	case antreanVerifikasi <- id:
 	default:
-		// antrean penuh, log untuk investigasi — TAPI permohonan
-		// tetap sudah tersimpan, tidak hilang.
+		log.Printf("antrean verifikasi penuh, permohonan %d menunggu penyapu berkala", id)
 	}
 
 	return id, nil
@@ -96,21 +98,63 @@ func WorkerVerifikasi(ctx context.Context, antrean <-chan int64, verifikasiNIK f
 		case <-ctx.Done():
 			return
 		case id := <-antrean:
-			const percobaanMaks = 5
-			for percobaan := 1; percobaan <= percobaanMaks; percobaan++ {
-				if err := verifikasiNIK(ctx, id); err == nil {
-					break
-				}
-				time.Sleep(time.Duration(percobaan) * 30 * time.Second)
+			if err := verifikasiDenganRetry(ctx, id, verifikasiNIK); err != nil {
+				// Tidak diam-diam dibuang: status tetap "menunggu_verifikasi",
+				// jadi penyapu berkala akan mencobanya lagi nanti.
+				log.Printf("verifikasi permohonan %d belum berhasil: %v", id, err)
 			}
 		}
 	}
 }
 
+func verifikasiDenganRetry(ctx context.Context, id int64, verifikasiNIK func(ctx context.Context, id int64) error) error {
+	const percobaanMaks = 5
+	var errTerakhir error
+	for percobaan := 1; percobaan <= percobaanMaks; percobaan++ {
+		if errTerakhir = verifikasiNIK(ctx, id); errTerakhir == nil {
+			return nil
+		}
+		if percobaan == percobaanMaks {
+			break
+		}
+		// Jeda bertambah tiap percobaan (backoff linear sederhana; versi
+		// production memakai exponential backoff dengan jitter), dan tetap
+		// menghormati ctx supaya shutdown tidak tertahan.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(percobaan) * 30 * time.Second):
+		}
+	}
+	return fmt.Errorf("gagal setelah %d percobaan: %w", percobaanMaks, errTerakhir)
+}
+
+// SapuVerifikasiTertunda berjalan berkala (misalnya tiap 10 menit) dan
+// memasukkan kembali permohonan yang statusnya masih "menunggu_verifikasi"
+// ke antrean. Inilah yang membuat channel in-memory aman dipakai sebagai
+// PEMICU cepat saja, bukan sebagai satu-satunya catatan pekerjaan.
+func SapuVerifikasiTertunda(ctx context.Context, antrean chan<- int64) error {
+	ids, err := ambilPermohonanMenungguVerifikasi(ctx)
+	if err != nil {
+		return fmt.Errorf("ambil permohonan tertunda: %w", err)
+	}
+	for _, id := range ids {
+		select {
+		case antrean <- id:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 type DataPermohonan struct{}
 
 func simpanPermohonan(ctx context.Context, data DataPermohonan) (int64, error) { return 1, nil }
+func ambilPermohonanMenungguVerifikasi(ctx context.Context) ([]int64, error) { return nil, nil }
 ```
+
+Perhatikan pembagian peran di kode ini. Channel hanyalah **pemicu cepat**; catatan pekerjaan yang sebenarnya adalah status `menunggu_verifikasi` di database. Tanpa `SapuVerifikasiTertunda`, permohonan yang gagal masuk channel (penuh, atau process mati sebelum diproses) akan tertahan selamanya tanpa ada yang tahu. Ini pola yang sama dengan [[The Transactional Outbox Pattern]]: pekerjaan yang tidak boleh hilang harus tercatat di penyimpanan yang durabel, bukan hanya di memori.
 
 ## In His Stack
 

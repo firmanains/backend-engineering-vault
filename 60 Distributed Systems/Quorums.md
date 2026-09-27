@@ -52,6 +52,8 @@ Konfigurasi `W` dan `R` bisa disesuaikan untuk kebutuhan berbeda: `W=N, R=1` (tu
 
 Quorum menjawab pertanyaan **berapa banyak node yang harus setuju**, tapi tidak dengan sendirinya menjawab pertanyaan **bagaimana** node-node itu menyetujui sesuatu secara koheren saat ada konflik (dua tulisan bersamaan ke data yang sama dari node berbeda). Inilah kenapa quorum sering jadi bahan bangunan untuk algoritma consensus yang lebih lengkap seperti [[Consensus - Raft]] — Raft memakai mayoritas (bentuk quorum) untuk memutuskan siapa leader dan kapan sebuah entri log dianggap ter-commit, tapi menambah struktur tambahan (leader tunggal, log berurutan) yang tidak disediakan quorum murni sendirian.
 
+Irisan juga baru separuh jaminan. `W + R > N` menjamin bahwa pembaca **menyentuh** setidaknya satu node yang menyimpan tulisan terbaru, tapi pembaca masih harus bisa **mengenali** mana nilai yang terbaru di antara jawaban yang berbeda-beda, biasanya lewat nomor versi. Bahkan dengan itu, quorum bergaya Dynamo belum otomatis linearizable. Kleppmann (dalam *Designing Data-Intensive Applications*) mencatat beberapa celahnya: tulisan yang gagal di sebagian node tapi tidak dibatalkan di node yang sudah menerimanya, pembacaan yang berjalan bersamaan dengan tulisan, dua tulisan konkuren yang diselesaikan dengan "timestamp terakhir menang" di tengah clock skew, dan *sloppy quorum* yang menerima tulisan di node di luar himpunan semestinya saat terjadi partition. Karena itu `W + R > N` lebih tepat dipahami sebagai syarat yang membuat pembacaan usang jauh lebih jarang, bukan bukti bahwa pembacaan usang mustahil.
+
 Poin yang sering luput: quorum menjamin konsistensi **hanya** kalau setiap operasi benar-benar menunggu konfirmasi dari jumlah node yang disyaratkan **sebelum** dianggap berhasil — sistem yang mengklaim memakai quorum tapi diam-diam melanjutkan sebelum quorum benar-benar terpenuhi (demi mengejar latency) kehilangan jaminan matematis yang jadi alasan quorum dipakai sejak awal.
 
 ## In Go
@@ -61,8 +63,8 @@ package quorum
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync"
 )
 
 type Node interface {
@@ -70,53 +72,53 @@ type Node interface {
 	Read(ctx context.Context, key string) (string, error)
 }
 
-// QuorumConfig SECARA EKSPLISIT menyatakan trade-off yang dipilih —
-// W+R > N menjamin irisan, W+R <= N BERARTI kehilangan jaminan
-// konsistensi baca-setelah-tulis.
+// QuorumConfig menyatakan trade-off yang dipilih secara eksplisit.
 type QuorumConfig struct {
 	W, R, N int
 }
 
-func (c QuorumConfig) GuaranteesConsistency() bool {
+// JaminIrisan melaporkan apakah setiap quorum baca pasti beririsan dengan
+// setiap quorum tulis. Irisan adalah syarat perlu, bukan jaminan penuh,
+// untuk membaca tulisan terbaru (lihat Under The Hood).
+func (c QuorumConfig) JaminIrisan() bool {
 	return c.W+c.R > c.N
 }
 
-// WriteQuorum mengirim tulisan ke SEMUA node secara paralel, tapi
-// baru dianggap berhasil setelah SEJUMLAH W node mengonfirmasi —
-// tidak lebih cepat dari itu, meski node lain belum merespons.
+// WriteQuorum mengirim tulisan ke SEMUA node secara paralel, dan dianggap
+// berhasil begitu W node mengonfirmasi. Tulisan ke node sisanya tetap
+// berjalan; channel ber-buffer memastikan goroutine-nya bisa selesai.
 func WriteQuorum(ctx context.Context, nodes []Node, config QuorumConfig, key, value string) error {
-	var wg sync.WaitGroup
-	acked := make(chan struct{}, len(nodes))
-
-	for _, node := range nodes {
-		wg.Add(1)
-		go func(n Node) {
-			defer wg.Done()
-			if err := n.Write(ctx, key, value); err == nil {
-				acked <- struct{}{}
-			}
-		}(node)
+	hasil := make(chan error, len(nodes))
+	for _, n := range nodes {
+		go func() { hasil <- n.Write(ctx, key, value) }()
 	}
 
-	go func() {
-		wg.Wait()
-		close(acked)
-	}()
-
-	count := 0
-	for range acked {
-		count++
-		if count >= config.W {
+	var acked int
+	var errs []error
+	for range nodes {
+		err := <-hasil
+		if err != nil {
+			errs = append(errs, err)
+			if len(nodes)-len(errs) < config.W {
+				break // W tidak mungkin lagi tercapai
+			}
+			continue
+		}
+		acked++
+		if acked >= config.W {
 			return nil // quorum tulis terpenuhi
 		}
 	}
-	return fmt.Errorf("quorum: hanya %d/%d node mengonfirmasi, butuh W=%d", count, len(nodes), config.W)
+	return fmt.Errorf("quorum: %d/%d node mengonfirmasi, butuh W=%d: %w",
+		acked, len(nodes), config.W, errors.Join(errs...))
 }
 ```
 
+Perhatikan satu konsekuensi yang tidak terlihat dari kode: kalau `WriteQuorum` gagal mencapai `W`, node yang **sudah** menerima tulisan tidak otomatis membatalkannya. Pemanggil menerima error, tapi sebagian replika sudah menyimpan nilai baru, dan pembaca berikutnya bisa melihat nilai itu. Ini salah satu celah quorum yang dibahas di atas.
+
 ## In His Stack
 
-Sistem replikasi database yang dipakai 13 aplikasi (baik MariaDB dengan setup multi-node, atau sistem terdistribusi lain yang mungkin diadopsi ke depan) sering menyediakan opsi konfigurasi yang secara implisit adalah pengaturan quorum — memahami rumus `W+R>N` membantu menjelaskan **kenapa** pengaturan replikasi tertentu (misalnya semi-synchronous replication) memberi jaminan tertentu, dan kenapa pengaturan lain (replikasi asinkron murni) tidak menjamin baca-setelah-tulis konsisten sama sekali, sesuatu yang penting dipahami sebelum memutuskan boleh atau tidak membaca dari replica untuk kebutuhan tertentu.
+Sistem replikasi database yang dipakai 13 aplikasi (baik MariaDB dengan setup multi-node, atau sistem terdistribusi lain yang mungkin diadopsi ke depan) sering menyediakan opsi konfigurasi yang secara implisit adalah pengaturan quorum — memahami rumus `W+R>N` membantu menjelaskan jaminan apa yang sebenarnya diberikan tiap pengaturan replikasi. Replikasi asinkron murni tidak menjamin baca-setelah-tulis sama sekali. Semi-synchronous replication di MariaDB menahan commit sampai minimal satu replica mengonfirmasi **menerima** event-nya; itu melindungi durability (tulisan tidak hilang kalau primary mati), tapi tidak menjamin pembacaan dari replica melihat tulisan itu, karena menerima event belum berarti sudah **menerapkannya**. Galera Cluster (replikasi sinkron berbasis sertifikasi di ekosistem MariaDB) lebih dekat ke jaminan quorum, dan menyediakan `wsrep_sync_wait` untuk memaksa pembacaan menunggu node menyusul. Detail ini penting dipahami sebelum memutuskan boleh atau tidak membaca dari replica untuk kebutuhan tertentu.
 
 ## Trade-offs and When Not To Use It
 
@@ -142,7 +144,7 @@ Quorum yang besar (mendekati `N`) memberi consistency lebih kuat tapi mengorbank
 
 > [!success]- Kunci jawaban
 > **1.** Dari total `N` node, dua kelompok mayoritas (masing-masing lebih dari `N/2`) yang dijumlahkan akan selalu melebihi `N` — secara matematis, dua himpunan yang jumlahnya melebihi total anggota yang tersedia tidak mungkin sepenuhnya terpisah, harus ada irisan minimal satu anggota.
-> **4.** Karena baca jauh lebih sering dari tulis, optimalkan `R` sekecil mungkin dan terima `W` yang lebih besar (tulis yang jarang terjadi boleh sedikit lebih lambat, demi baca yang sering terjadi jadi secepat mungkin): pilih `R=1` (baca dari satu node mana pun, tercepat) dan `W=5` (tulis harus dikonfirmasi SEMUA node) — ini menjamin `W+R=6 > N=5`, memenuhi syarat konsistensi, sekaligus membuat operasi baca (yang dominan) berjalan secepat mungkin dengan mengorbankan latency tulis (yang jarang terjadi, jadi lebih bisa diterima jika sedikit lebih lambat). Trade-off ini masuk akal justru karena pola akses 100:1 — mengoptimalkan untuk operasi yang jarang (tulis) dengan mengorbankan yang sering (baca) akan menjadi keputusan yang salah arah untuk pola akses ini.
+> **4.** Karena baca jauh lebih sering dari tulis, optimalkan `R` sekecil mungkin dan terima `W` yang lebih besar (tulis yang jarang terjadi boleh sedikit lebih lambat, demi baca yang sering terjadi jadi secepat mungkin): pilih `R=1` (baca dari satu node mana pun, tercepat) dan `W=5` (tulis harus dikonfirmasi SEMUA node) — ini menjamin `W+R=6 > N=5`, memenuhi syarat konsistensi, sekaligus membuat operasi baca (yang dominan) berjalan secepat mungkin dengan mengorbankan latency tulis (yang jarang terjadi, jadi lebih bisa diterima jika sedikit lebih lambat). Trade-off ini masuk akal justru karena pola akses 100:1. Tapi harganya perlu disebut terang-terangan: dengan `W=5`, **satu** node saja yang mati atau sedang maintenance membuat semua perubahan konfigurasi tertolak. Kalau itu tidak bisa diterima, `W=4, R=2` tetap memenuhi `W+R>N`, masih membuat baca murah, dan mentoleransi satu node mati saat menulis. Pilihan antara keduanya adalah pertanyaan bisnis: seberapa sering konfigurasi harus bisa diubah pada saat ada node yang bermasalah.
 
 ## Self-Check
 

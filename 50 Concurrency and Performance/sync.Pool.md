@@ -29,32 +29,33 @@ Analogi ini bocor pada satu hal penting: rak nampan kantin **selalu** menyimpan 
 ## How It Works
 
 ```go
-package main
+package upload
 
 import (
-	"fmt"
+	"io"
 	"sync"
 )
 
-// bufferPool menyimpan []byte berukuran 64KB yang bisa didaur ulang
-// antar request — New() dipanggil HANYA kalau pool kosong dan tidak
-// ada objek yang bisa didaur ulang saat ini.
+// bufferPool menyimpan POINTER ke []byte 64KB. Menyimpan []byte langsung
+// (bukan pointer) membuat setiap Put mengalokasi lagi, karena slice header
+// harus dibungkus ke interface di heap, dan itu meniadakan manfaat pool.
 var bufferPool = sync.Pool{
-	New: func() interface{} {
-		fmt.Println("membuat buffer BARU (pool kosong)")
-		return make([]byte, 64*1024)
+	New: func() any {
+		b := make([]byte, 64*1024)
+		return &b
 	},
 }
 
-func prosesUpload(data []byte) {
-	// Get() mengambil objek dari pool (atau memanggil New() kalau kosong).
-	buf := bufferPool.Get().([]byte)
-	// PENTING: defer Put() SEGERA setelah Get(), memastikan buffer
-	// selalu dikembalikan meski terjadi early return atau panic.
-	defer bufferPool.Put(buf)
+// salinDenganBuffer menyalin src ke dst memakai buffer dari pool.
+func salinDenganBuffer(dst io.Writer, src io.Reader) (int64, error) {
+	bufPtr := bufferPool.Get().(*[]byte)
+	// defer Put segera setelah Get: buffer selalu dikembalikan meski
+	// fungsi keluar lewat jalur error.
+	defer bufferPool.Put(bufPtr)
 
-	// ... pakai buf untuk memproses data ...
-	copy(buf, data)
+	// Isi buffer lama tidak perlu dibersihkan di sini karena CopyBuffer
+	// selalu menimpa bagian yang dibaca sebelum menulisnya.
+	return io.CopyBuffer(dst, src, *bufPtr)
 }
 ```
 
@@ -71,14 +72,14 @@ flowchart LR
 
 `sync.Pool` bersifat **per-P** (per konteks penjadwalan, lihat [[Goroutine Scheduler (GMP)]]) secara internal — setiap P punya penyimpanan lokalnya sendiri untuk pool, mengurangi kontensi lock yang akan terjadi kalau seluruh goroutine di semua P berebut satu penyimpanan pool tunggal yang sama. Objek juga bisa "dicuri" (work stealing, mirip goroutine) dari pool P lain kalau pool lokal kosong, sebelum benar-benar memanggil `New()`.
 
-**Objek di `sync.Pool` dibersihkan GC secara agresif** — pada implementasi yang berlaku di banyak versi Go, objek yang tidak diambil sebelum siklus GC berikutnya berisiko dibersihkan sepenuhnya (pool dikosongkan). Ini desain yang **disengaja** — `sync.Pool` bukan cache jangka panjang, ia murni mengurangi alokasi untuk objek berumur pendek yang polanya "alokasi cepat, buang cepat, ulangi" dalam rentang waktu singkat antar siklus GC.
+**Objek di `sync.Pool` dibersihkan GC secara agresif.** Sejak Go 1.13, pool memakai *victim cache*: saat satu siklus GC terjadi, isi pool dipindahkan ke penyimpanan "korban", dan baru dibuang pada siklus GC berikutnya kalau tidak diambil. Jadi objek bertahan paling lama sekitar dua siklus GC tanpa dipakai. Ini desain yang **disengaja** — `sync.Pool` bukan cache jangka panjang, ia murni mengurangi alokasi untuk objek berumur pendek yang polanya "alokasi cepat, buang cepat, ulangi" dalam rentang waktu singkat antar siklus GC.
 
 **Objek yang dikembalikan ke pool harus di-reset** ke keadaan bersih sebelum (atau segera setelah) diambil kembali — `sync.Pool` tidak melakukan ini secara otomatis. Melupakan reset adalah sumber bug yang serius: objek yang masih menyimpan data dari pemakaian sebelumnya bisa **bocor** ke pemakaian berikutnya yang tidak menyadarinya, berpotensi membocorkan data antar request yang seharusnya sepenuhnya terisolasi satu sama lain — kelas bug keamanan yang serius kalau melibatkan data sensitif.
 
 ## In Go
 
 ```go
-package main
+package respons
 
 import (
 	"bytes"
@@ -130,6 +131,12 @@ func BangunResponse(data map[string]string) []byte {
 
 > [!warning] Jebakan
 > Mengembalikan slice/pointer yang menunjuk ke bagian internal objek pool (misalnya `buf.Bytes()` tanpa disalin) setelah objek dikembalikan ke pool — data itu bisa berubah atau rusak begitu objek yang sama diambil ulang dan dipakai kode lain.
+
+> [!warning] Jebakan
+> Menyimpan nilai non-pointer seperti `[]byte` langsung di pool. Setiap `Put` harus membungkus slice header itu ke dalam interface, yang berarti satu alokasi baru, dan manfaat pool hilang. Simpan pointer (`*[]byte`, `*bytes.Buffer`); linter `staticcheck` (SA6002) menangkap pola ini.
+
+> [!warning] Jebakan
+> Mengembalikan buffer yang sudah tumbuh sangat besar ke pool. Satu request dengan payload 50 MB membuat `bytes.Buffer` tumbuh ke 50 MB, dan kalau dikembalikan ke pool, memori itu tertahan dan dipakai ulang untuk request kecil. Periksa kapasitas sebelum `Put` dan buang buffer yang melebihi batas wajar (misalnya `if buf.Cap() > 1<<20 { return }`).
 
 > [!warning] Jebakan
 > Menerapkan `sync.Pool` untuk objek yang jarang dialokasikan atau berukuran sangat kecil — menambah kompleksitas kode tanpa manfaat performa yang sepadan, karena GC modern sudah cukup efisien untuk kasus volume rendah.

@@ -52,7 +52,10 @@ Read model bisa memakai teknologi penyimpanan yang **sama sekali berbeda** dari 
 ```go
 package cqrs
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // Command dan Query TERPISAH secara EKSPLISIT — bukan satu
 // interface generik yang menangani keduanya.
@@ -91,17 +94,31 @@ type Projector struct {
 	ReadModelStore ReadModelStore
 }
 
+// ReadModelStore mengganti (replace) seluruh baris summary, bukan
+// melakukan partial update field per field.
 type ReadModelStore interface {
+	GetSummary(ctx context.Context, caseID string) (CaseSummary, error)
 	UpdateSummary(ctx context.Context, summary CaseSummary) error
 }
 
+// OnStatusChanged HARUS membaca summary yang sudah ada dulu sebelum
+// menulis ulang. Karena UpdateSummary mengganti seluruh baris, menulis
+// CaseSummary{CaseID: caseID, Status: newStatus} langsung akan MENIMPA
+// PetugasNama, JumlahDokumen, dan TanggalAjuan dengan nilai kosong —
+// bug baca-ubah-tulis yang sama seperti yang dibahas di
+// [[../40 Databases/Deliberate Denormalisation|Deliberate Denormalisation]].
 func (p *Projector) OnStatusChanged(ctx context.Context, caseID, newStatus string) error {
-	// Bentuk sederhana: dalam praktik nyata, projector sering perlu
-	// membaca data tambahan untuk melengkapi read model.
-	return p.ReadModelStore.UpdateSummary(ctx, CaseSummary{
-		CaseID: caseID,
-		Status: newStatus,
-	})
+	summary, err := p.ReadModelStore.GetSummary(ctx, caseID)
+	if err != nil {
+		return fmt.Errorf("cqrs: baca summary %s sebelum update: %w", caseID, err)
+	}
+
+	summary.Status = newStatus
+
+	if err := p.ReadModelStore.UpdateSummary(ctx, summary); err != nil {
+		return fmt.Errorf("cqrs: simpan summary %s: %w", caseID, err)
+	}
+	return nil
 }
 ```
 

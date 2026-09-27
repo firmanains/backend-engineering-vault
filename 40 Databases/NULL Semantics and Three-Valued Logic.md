@@ -55,6 +55,8 @@ SELECT * FROM permohonan
 WHERE alasan_penolakan <> 'ditolak_admin' OR alasan_penolakan IS NULL;
 ```
 
+Untuk membandingkan dua kolom yang sama-sama bisa `NULL` dan ingin `NULL` dianggap setara dengan `NULL`, SQL menyediakan perbandingan yang *NULL-safe*: `<=>` di MySQL/MariaDB (`a <=> b` bernilai `TRUE` kalau keduanya `NULL`) dan `IS NOT DISTINCT FROM` di PostgreSQL. Keduanya selalu menghasilkan `TRUE`/`FALSE`, tidak pernah `UNKNOWN`.
+
 Fungsi agregat juga punya aturan `NULL` sendiri yang sering disalahpahami: `COUNT(*)` menghitung **semua baris** termasuk yang kolomnya `NULL`, tapi `COUNT(kolom)` mengabaikan baris di mana `kolom` bernilai `NULL`. `SUM()`, `AVG()`, `MAX()`, `MIN()` semuanya **mengabaikan** `NULL` secara diam-diam — `AVG()` dari `[10, NULL, 20]` adalah `15` (rata-rata dari 2 nilai, bukan 3), bukan `10` seperti kalau `NULL` dihitung sebagai `0`.
 
 ## In Go

@@ -20,7 +20,9 @@ TLS handshake terjadi tepat setelah koneksi TCP terbuka dan sebelum satu byte da
 
 Bayangkan sebuah service Go yang perlu memanggil API sebuah partner instansi lewat HTTPS. Saat dicoba dengan `curl` dari laptop developer, semuanya berhasil sempurna. Tapi begitu dijalankan dari service Go di production, panggilan itu selalu gagal dengan error semacam `x509: certificate signed by unknown authority`.
 
-Penyebab paling umum untuk kasus seperti ini: server partner hanya mengirim sertifikat mereka sendiri, tanpa **sertifikat intermediate** yang menghubungkannya ke root CA yang benar-benar tepercaya. Browser dan `curl` di banyak sistem punya mekanisme tambahan (seperti mengambil sertifikat intermediate yang hilang lewat informasi AIA di sertifikat, atau menyimpan cache intermediate dari kunjungan sebelumnya) yang membuat mereka tetap berhasil memverifikasi rantai kepercayaan meski server tidak mengirim rantai lengkap. Implementasi TLS di `crypto/tls` Go jauh lebih ketat secara default — ia hanya memverifikasi rantai yang benar-benar dikirim server saat handshake, tanpa mekanisme "menebak" tambahan itu. Hasilnya: kegagalan yang terlihat seperti bug di sisi Go-mu, padahal akar masalahnya ada di konfigurasi server partner.
+Penyebab paling umum untuk kasus seperti ini: server partner hanya mengirim sertifikat mereka sendiri, tanpa **sertifikat intermediate** yang menghubungkannya ke root CA yang benar-benar tepercaya. Browser dan `curl` di banyak sistem punya mekanisme tambahan (seperti mengambil sertifikat intermediate yang hilang lewat informasi AIA di sertifikat, atau menyimpan cache intermediate dari kunjungan sebelumnya) yang membuat mereka tetap berhasil memverifikasi rantai kepercayaan meski server tidak mengirim rantai lengkap. Di Linux, verifikasi sertifikat Go (`crypto/x509`) hanya memakai rantai yang benar-benar dikirim server saat handshake, tanpa mekanisme "menebak" tambahan itu. Hasilnya: kegagalan yang terlihat seperti bug di sisi Go-mu, padahal akar masalahnya ada di konfigurasi server partner.
+
+Nuansa platform membuat kasus ini makin membingungkan. Di macOS dan Windows, Go memakai verifier bawaan OS, yang bisa melengkapi intermediate yang hilang. Jadi binary Go yang sama bisa berhasil di laptop macOS developer dan gagal di server Linux production. Sebaliknya, `curl` berbasis OpenSSL di Linux umumnya gagal dengan cara yang sama seperti Go.
 
 ## Intuition
 
@@ -61,7 +63,7 @@ TLS 1.3 (dibanding TLS 1.2 sebelumnya) mengurangi jumlah round-trip yang dibutuh
 ```go
 // JANGAN pernah melakukan ini di production — mematikan verifikasi
 // sertifikat sepenuhnya, membuat koneksi rentan man-in-the-middle.
-badClient := &http.Client{
+var badClient = &http.Client{
     Transport: &http.Transport{
         TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // BAHAYA
     },
@@ -69,7 +71,7 @@ badClient := &http.Client{
 
 // Konfigurasi yang wajar: menetapkan versi TLS minimum secara eksplisit,
 // tanpa mematikan verifikasi sertifikat sama sekali.
-safeClient := &http.Client{
+var safeClient = &http.Client{
     Timeout: 10 * time.Second,
     Transport: &http.Transport{
         TLSClientConfig: &tls.Config{
@@ -103,7 +105,7 @@ func inspectServerCertChain(ctx context.Context, addr string) error {
 }
 ```
 
-`inspectServerCertChain` mencetak persis sertifikat apa saja yang dikirim server saat handshake — kalau hanya ada satu sertifikat (milik server itu sendiri) tanpa sertifikat intermediate yang menghubungkannya ke root CA, itu konfirmasi langsung bahwa server tidak mengirim rantai lengkap, yang menjelaskan kenapa `crypto/tls` menolaknya meski `curl` di beberapa environment tetap berhasil. Kalau function ini mencetak hanya satu sertifikat, itu konfirmasi langsung bahwa server tidak mengirim rantai lengkap — dan itu bisa dilihat justru karena verifikasi dimatikan; dengan verifikasi aktif, koneksinya gagal sebelum sempat memperlihatkan apa pun.
+`inspectServerCertChain` mencetak persis sertifikat apa saja yang dikirim server saat handshake — kalau hanya ada satu sertifikat (milik server itu sendiri) tanpa sertifikat intermediate yang menghubungkannya ke root CA, itu konfirmasi langsung bahwa server tidak mengirim rantai lengkap, yang menjelaskan kenapa `crypto/tls` menolaknya meski `curl` di beberapa environment tetap berhasil. Rantai itu hanya bisa dilihat justru karena verifikasi dimatikan; dengan verifikasi aktif, koneksinya gagal sebelum sempat memperlihatkan apa pun.
 
 ## In His Stack
 
@@ -124,7 +126,7 @@ TLS handshake menambah latency (round-trip tambahan sebelum data aplikasi mulai 
 > Menyetel `InsecureSkipVerify: true` "sementara" untuk membuat koneksi berhasil saat development, lalu lupa menghapusnya sebelum deploy ke production — ini mematikan seluruh verifikasi sertifikat, membuat koneksi rentan terhadap man-in-the-middle attack tanpa peringatan apa pun di level kode.
 
 > [!warning] Jebakan
-> Server yang tidak mengirim sertifikat intermediate lengkap, mengandalkan klien untuk "menebak" atau mengambilnya sendiri. Sebagian klien (browser modern, beberapa versi `curl`) cukup toleran soal ini; klien lain (termasuk `crypto/tls` Go secara default) tidak — dan mengasumsikan semua klien akan seberhasil `curl` di laptopmu adalah kesalahan diagnosis yang umum.
+> Server yang tidak mengirim sertifikat intermediate lengkap, mengandalkan klien untuk "menebak" atau mengambilnya sendiri. Sebagian klien (browser modern, dan klien apa pun yang memakai verifier bawaan macOS atau Windows) cukup toleran soal ini; klien lain (Go di Linux, `curl` berbasis OpenSSL) tidak — dan mengasumsikan semua klien akan seberhasil `curl` di laptopmu adalah kesalahan diagnosis yang umum.
 
 > [!warning] Jebakan
 > Menganggap TLS otomatis berarti "aman dari semua ancaman" hanya karena koneksinya terenkripsi. Data yang dikirim lewat TLS bisa saja tetap berisi SQL injection, payload XSS, atau permintaan tanpa otorisasi yang benar — enkripsi transportnya tidak memeriksa isi datanya sama sekali.

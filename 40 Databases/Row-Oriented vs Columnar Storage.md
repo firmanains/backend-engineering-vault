@@ -14,7 +14,7 @@ created: 2026-07-29
 
 ## TL;DR
 
-Bagaimana database menyusun data secara fisik di disk menentukan beban kerja apa yang ia layani dengan efisien. Penyimpanan **row-oriented** (MariaDB/InnoDB, PostgreSQL default) menyimpan seluruh kolom satu baris berdampingan secara fisik — efisien untuk mengambil atau mengubah **satu baris utuh** sekaligus, pola akses khas aplikasi transaksional. Penyimpanan **columnar** (ClickHouse dan sejenisnya) menyimpan setiap **kolom** berdampingan secara terpisah di seluruh baris — efisien untuk membaca **satu atau beberapa kolom** dari jutaan baris sekaligus sambil mengabaikan kolom lain sepenuhnya, pola akses khas query analitik. Ini bukan soal mana yang "lebih baik" secara universal — keduanya mengoptimalkan pola akses yang berlawanan, dan memilih yang salah untuk beban kerjamu berarti membayar biaya struktural yang tidak bisa ditambal dengan index atau tuning apa pun.
+Bagaimana database menyusun data secara fisik di disk menentukan beban kerja apa yang ia layani dengan efisien. Penyimpanan **row-oriented** (MariaDB/InnoDB, PostgreSQL default) menyimpan seluruh kolom satu baris berdampingan secara fisik — efisien untuk mengambil atau mengubah **satu baris utuh** sekaligus, pola akses khas aplikasi transaksional. Penyimpanan **columnar** (ClickHouse dan sejenisnya) menyimpan setiap **kolom** berdampingan secara terpisah di seluruh baris — efisien untuk membaca **satu atau beberapa kolom** dari jutaan baris sekaligus sambil mengabaikan kolom lain sepenuhnya, pola akses khas query analitik. Ini bukan soal mana yang "lebih baik" secara universal — keduanya mengoptimalkan pola akses yang berlawanan, dan memilih yang salah untuk beban kerjamu berarti membayar biaya struktural yang hanya bisa dikurangi, bukan dihilangkan, oleh index atau tuning.
 
 ## The Problem
 
@@ -66,20 +66,38 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
-// TransaksiRepo bicara ke database row-oriented (MariaDB) — dioptimalkan
-// untuk operasi per baris: ambil satu, ubah satu.
+// TransaksiRepo bicara ke database row-oriented (MariaDB), yang dioptimalkan
+// untuk operasi per baris: ambil satu, ubah satu. Scan time.Time dari
+// DATETIME butuh parseTime=true di DSN go-sql-driver/mysql.
 type TransaksiRepo struct {
 	db *sql.DB
 }
 
-func (r *TransaksiRepo) AmbilPermohonanUtuh(ctx context.Context, id int64) (map[string]any, error) {
-	// SELECT * cocok di sini karena row-oriented memang menyimpan seluruh
-	// kolom satu baris berdampingan — mengambil semuanya sekaligus MURAH.
-	row := r.db.QueryRowContext(ctx, `SELECT * FROM permohonan WHERE id = ?`, id)
-	_ = row
-	return nil, fmt.Errorf("implementasi scan diringkas untuk fokus pada konsep")
+type Permohonan struct {
+	ID            int64
+	Nomor         string
+	Status        string
+	JenisLayanan  string
+	TanggalDibuat time.Time
+}
+
+// AmbilPermohonan mengambil banyak kolom dari satu baris. Di row-oriented,
+// semua kolom ini tersimpan berdampingan di satu halaman, jadi biayanya
+// hampir sama dengan mengambil satu kolom saja. Kolom tetap ditulis
+// eksplisit (bukan SELECT *) supaya perubahan skema tidak merusak Scan.
+func (r *TransaksiRepo) AmbilPermohonan(ctx context.Context, id int64) (*Permohonan, error) {
+	var p Permohonan
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, nomor_permohonan, status, jenis_layanan, tanggal_dibuat
+		FROM permohonan WHERE id = ?`, id,
+	).Scan(&p.ID, &p.Nomor, &p.Status, &p.JenisLayanan, &p.TanggalDibuat)
+	if err != nil {
+		return nil, fmt.Errorf("ambil permohonan %d: %w", id, err)
+	}
+	return &p, nil
 }
 
 // AnalitikRepo bicara ke database columnar (ClickHouse) — dioptimalkan
@@ -113,7 +131,7 @@ Pola arsitektur yang umum: data transaksional tetap hidup di MariaDB (row-orient
 
 ## In His Stack
 
-Ini adalah alasan konkret kenapa ClickHouse ada di daftar tool `working` tier untuk konteks kerja ini (lihat `92 Tools/_Overview.md`) — begitu laporan analitik lintas tahun mulai memperlambat aplikasi transaksional harian di MariaDB, jawabannya bukan menambah index atau menambah RAM server MariaDB, tapi memindahkan beban analitik itu ke sistem yang secara struktural dirancang untuknya. Elasticsearch, meski bukan murni database analitik kolom, juga memakai prinsip penyimpanan yang mengoptimalkan pencarian dan agregasi lintas banyak dokumen — pemahaman row vs columnar di sini membantu memahami kenapa Elasticsearch terasa begitu berbeda dari MariaDB meski keduanya sama-sama "menyimpan data".
+Ini adalah alasan konkret kenapa ClickHouse ada di daftar tool `working` tier untuk konteks kerja ini (lihat `92 Tools/_Overview.md`) — begitu laporan analitik lintas tahun mulai memperlambat aplikasi transaksional harian di MariaDB, jawabannya bukan menambah index atau menambah RAM server MariaDB, tapi memindahkan beban analitik itu ke sistem yang secara struktural dirancang untuknya. Elasticsearch memperlihatkan kedua gagasan ini sekaligus. Untuk pencarian, ia memakai inverted index; untuk sorting dan agregasi, ia menyimpan nilai field dalam struktur kolom di disk yang disebut *doc values*. Itulah kenapa agregasi di Elasticsearch terasa cepat meski ia bukan database analitik murni, dan kenapa field `text` yang di-analyze tidak bisa langsung dipakai untuk agregasi.
 
 ## Trade-offs and When Not To Use It
 
@@ -128,7 +146,7 @@ Columnar storage adalah pilihan yang salah untuk beban kerja OLTP — transaksi 
 > Mengira database columnar bisa langsung menggantikan database row-oriented untuk seluruh kebutuhan aplikasi — transaksi per-baris yang sering (`UPDATE` status satu permohonan) menjadi jauh lebih mahal atau bahkan tidak didukung native di kebanyakan database columnar.
 
 > [!warning] Jebakan
-> Mencoba memperbaiki performa query analitik lambat di database row-oriented lewat index atau tuning konfigurasi saja — index membantu untuk **mencari** baris tertentu, tapi tidak mengubah fakta struktural bahwa setiap baris yang dibaca tetap membawa seluruh kolomnya, bukan hanya kolom yang relevan untuk agregasi.
+> Mengira index atau tuning bisa mengubah database row-oriented menjadi mesin analitik. [[Covering Indexes|Covering index]] memang bisa membuat satu query analitik hanya membaca kolom yang ia butuhkan (index-only scan atas `(jenis_layanan, tanggal_dibuat, tanggal_selesai)` misalnya), dan itu mitigasi yang sah untuk satu-dua laporan. Tapi setiap laporan baru butuh index barunya sendiri, setiap index menambah biaya tulis ke tabel transaksional, dan pemrosesannya tetap baris demi baris tanpa kompresi per kolom maupun vectorized execution. Begitu jumlah laporan bertambah, arah yang tepat adalah memindahkan beban analitik, bukan menumpuk index.
 
 ## Exercises
 

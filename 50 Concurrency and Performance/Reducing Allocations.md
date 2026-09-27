@@ -18,7 +18,7 @@ created: 2026-07-29
 
 ## The Problem
 
-Sebuah fungsi yang memproses ribuan baris data per request membangun slice hasil dengan `append` berulang tanpa pre-alokasi kapasitas (`var hasil []Item` lalu `hasil = append(hasil, item)` di dalam loop) — pola yang terlihat wajar, tapi setiap kali slice mencapai kapasitas maksimalnya, Go harus mengalokasikan array baru yang lebih besar (biasanya dua kali lipat) dan **menyalin seluruh isi lama** ke lokasi baru. Untuk slice yang tumbuh dari nol sampai ribuan elemen, ini berarti puluhan alokasi dan penyalinan berulang, ketika sebenarnya jumlah elemen akhir sudah bisa diperkirakan (atau bahkan diketahui persis) sebelum loop dimulai.
+Sebuah fungsi yang memproses ribuan baris data per request membangun slice hasil dengan `append` berulang tanpa pre-alokasi kapasitas (`var hasil []Item` lalu `hasil = append(hasil, item)` di dalam loop) — pola yang terlihat wajar, tapi setiap kali slice mencapai kapasitas maksimalnya, Go harus mengalokasikan array baru yang lebih besar (biasanya dua kali lipat) dan **menyalin seluruh isi lama** ke lokasi baru. Untuk slice yang tumbuh dari nol sampai sepuluh ribu elemen, ini berarti belasan alokasi dan penyalinan berulang, ketika sebenarnya jumlah elemen akhir sudah bisa diperkirakan (atau bahkan diketahui persis) sebelum loop dimulai.
 
 Masalah kedua: sebuah fungsi yang memproses request HTTP berulang kali mengonversi `[]byte` (body request) ke `string` dan sebaliknya untuk berbagai keperluan (`string(bodyBytes)`, lalu `[]byte(stringHasil)` lagi nanti) — setiap konversi ini **menyalin** seluruh data, karena string di Go bersifat immutable dan tidak bisa berbagi memori langsung dengan `[]byte` yang mutable. Untuk payload besar yang diproses berkali-kali, konversi bolak-balik yang tidak perlu ini menjadi sumber alokasi dan penyalinan yang signifikan, sesuatu yang mudah dihindari kalau kode ditulis sadar akan biaya konversi ini sejak awal.
 
@@ -64,7 +64,7 @@ flowchart LR
     E --> F["...berulang setiap kapasitas terlampaui"]
 ```
 
-Diagram ini menunjukkan pola pertumbuhan slice tanpa pre-alokasi — setiap kali kapasitas terlampaui, alokasi baru (biasanya dua kali lipat kapasitas lama) dan penyalinan seluruh elemen yang sudah ada terjadi, sebuah biaya kumulatif yang sepenuhnya dihindari kalau kapasitas akhir sudah diketahui di awal.
+Diagram ini menunjukkan pola pertumbuhan slice tanpa pre-alokasi — setiap kali kapasitas terlampaui, alokasi baru dan penyalinan seluruh elemen yang sudah ada terjadi. Untuk slice kecil kapasitasnya kira-kira berlipat dua; untuk slice yang sudah besar (di atas beberapa ratus elemen), runtime sejak Go 1.18 menumbuhkannya dengan faktor yang lebih landai menuju sekitar 1,25x. Karena pertumbuhannya geometris, total biaya penyalinan tetap sebanding dengan jumlah elemen (*amortized*), jadi masalahnya nyata di hot path yang dipanggil jutaan kali, tapi kecil untuk fungsi yang dipanggil sesekali.
 
 ## Under The Hood
 
@@ -108,7 +108,7 @@ func BuatLaporanDenganBuilder(baris []string) string {
 
 ## In His Stack
 
-Untuk endpoint yang memproses dan mengembalikan daftar data dalam jumlah besar (laporan, hasil pencarian dengan banyak baris), kebiasaan pre-alokasi slice hasil berdasarkan `COUNT(*)` query atau estimasi ukuran yang wajar adalah optimasi kecil dengan biaya penerapan yang rendah tapi manfaat nyata untuk endpoint bervolume tinggi — terutama relevan untuk laporan yang diakses berulang kali oleh banyak petugas di berbagai instansi sepanjang hari.
+Untuk endpoint yang memproses dan mengembalikan daftar data dalam jumlah besar (laporan, hasil pencarian dengan banyak baris), kebiasaan pre-alokasi slice hasil berdasarkan ukuran yang sudah diketahui (misalnya `LIMIT` halaman yang diminta) adalah optimasi kecil dengan biaya penerapan yang rendah tapi manfaat nyata untuk endpoint bervolume tinggi — terutama relevan untuk laporan yang diakses berulang kali oleh banyak petugas di berbagai instansi sepanjang hari.
 
 ## Trade-offs and When Not To Use It
 
@@ -134,7 +134,7 @@ Mengoptimalkan alokasi untuk kode yang jarang dipanggil atau memproses data dala
 
 > [!success]- Kunci jawaban
 > **1.** Slice Go disimpan sebagai array yang mendasarinya (underlying array) dengan kapasitas tetap — begitu jumlah elemen (`len`) mencapai kapasitas (`cap`), `append` berikutnya harus mengalokasikan array baru yang lebih besar dan menyalin seluruh elemen lama ke array baru itu sebelum menambahkan elemen baru. Kalau kapasitas akhir sudah dialokasikan sejak awal (`make([]T, 0, kapasitasAkhir)`), seluruh operasi `append` berikutnya cukup menambah elemen ke array yang sudah cukup besar, tanpa pernah perlu realokasi atau penyalinan sama sekali.
-> **4.** Karena jumlah baris pasti tidak diketahui sebelum query selesai, dua pendekatan wajar: (a) kalau database mendukung `COUNT(*)` yang murah dijalankan terpisah sebelum query utama (atau tersedia dari total hasil paginasi), jalankan itu dulu untuk mendapat estimasi kapasitas yang akurat; (b) kalau `COUNT` terpisah dianggap terlalu mahal (query tambahan yang menambah latency), pre-alokasi dengan **estimasi wajar** berdasarkan pengalaman historis (misalnya rata-rata jumlah baris untuk laporan sejenis, katakanlah 5000 sebagai titik tengah dari rentang seribu sampai sepuluh ribu) — estimasi yang meleset tetap jauh lebih baik daripada tidak pre-alokasi sama sekali, karena `append` yang melebihi kapasitas awal tetap akan melakukan realokasi seperti biasa (hanya lebih jarang terjadi dibanding mulai dari kapasitas nol), sementara estimasi yang mendekati tetap menghindari mayoritas realokasi yang seharusnya terjadi.
+> **4.** Pertama, bandingkan skalanya. Slice yang tumbuh sampai sepuluh ribu elemen hanya mengalami belasan kali realokasi, dengan total penyalinan sebanding dengan jumlah elemen. Biaya itu kecil dibanding query database dan serialisasi JSON untuk sepuluh ribu baris, jadi **jangan** menambah query `COUNT(*)` terpisah demi menghitung kapasitas: query tambahan itu jauh lebih mahal dari penghematannya, dan hasilnya pun bisa berbeda dari query utama kalau data berubah di antaranya. Pendekatan yang wajar: (a) kalau endpoint memakai paginasi, ukuran maksimum sudah diketahui dari `LIMIT`, jadi `make([]DTO, 0, limit)` sudah tepat; (b) tanpa paginasi, pre-alokasi dengan estimasi yang masuk akal (misalnya titik tengah rentang historis) dan biarkan `append` menangani sisanya. Pertanyaan yang lebih penting daripada kapasitas slice adalah kenapa satu response membawa sampai sepuluh ribu baris sama sekali; paginasi atau streaming response biasanya menghemat jauh lebih banyak memori.
 
 ## Self-Check
 

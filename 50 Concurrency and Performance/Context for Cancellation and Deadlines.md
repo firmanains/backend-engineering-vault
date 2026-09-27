@@ -55,8 +55,8 @@ func main() {
 	// WithTimeout membuat context yang OTOMATIS dibatalkan setelah durasi
 	// tertentu — ctx.Done() akan menutup channelnya sendiri saat timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel() // SELALU panggil cancel, bahkan kalau timeout sudah terjadi —
-	                // mencegah goroutine internal context bocor.
+	defer cancel() // selalu panggil cancel, bahkan kalau timeout sudah terjadi:
+	               // melepas timer dan pendaftaran context ini di induknya.
 
 	err := panggilPartner(ctx, "instansi-x")
 	fmt.Println("hasil:", err) // context deadline exceeded, karena timeout 1s < 3s panggilan
@@ -79,7 +79,7 @@ Diagram ini menunjukkan sifat **hierarkis** context: membatalkan context di leve
 
 **Empat fungsi pembuat context turunan**: `context.WithCancel` (bisa dibatalkan manual lewat fungsi `cancel()` yang dikembalikan), `context.WithTimeout` (dibatalkan otomatis setelah durasi tertentu), `context.WithDeadline` (dibatalkan otomatis pada waktu absolut tertentu, mirip `WithTimeout` tapi dengan titik waktu tetap, bukan durasi relatif), dan `context.WithValue` (menambah satu pasangan key-value, tidak memengaruhi pembatalan). Setiap fungsi ini mengembalikan context **baru** yang merupakan turunan dari context yang diberikan — context asli tidak diubah (immutable), konsisten dengan filosofi Go menghindari mutasi tersembunyi.
 
-**`cancel()` harus SELALU dipanggil**, bahkan kalau operasinya sudah selesai normal sebelum timeout — `context.WithTimeout`/`WithCancel` menjalankan goroutine internal (dan/atau timer) untuk memantau kondisi pembatalan; lupa memanggil `cancel()` (biasanya lewat `defer cancel()` segera setelah context dibuat) membuat resource internal ini tidak pernah dibersihkan sampai timeout aslinya benar-benar habis — sebuah bentuk kebocoran resource yang halus tapi nyata pada skala tinggi.
+**`cancel()` harus selalu dipanggil**, bahkan kalau operasinya sudah selesai normal sebelum timeout. Context turunan mendaftarkan dirinya di context induk supaya bisa ikut dibatalkan, dan `WithTimeout`/`WithDeadline` juga memasang timer. Tanpa `cancel()`, pendaftaran itu baru dilepas ketika induknya dibatalkan atau timer-nya habis. Kalau induknya berumur panjang (misalnya context milik worker yang hidup sepanjang aplikasi), context anak yang tidak pernah di-cancel terus menumpuk di memori. Dalam beberapa kasus (induk berupa implementasi `Context` buatan sendiri), runtime bahkan menjalankan goroutine tambahan untuk meneruskan pembatalan. `go vet` punya pemeriksaan `lostcancel` yang menangkap `cancel` yang tidak pernah dipanggil.
 
 ## In Go
 
@@ -92,31 +92,56 @@ import (
 	"time"
 )
 
-// AmbilDataDenganDeadline menunjukkan pola LENGKAP: deadline eksplisit
-// untuk operasi yang berpotensi lambat (query database, panggilan API),
-// dan cancel() SELALU dipanggil lewat defer.
+// AmbilDataDenganDeadline: kalau operasinya sudah menerima context (seperti
+// db.QueryContext atau http.NewRequestWithContext), cukup teruskan ctx.
+// Operasi itu sendiri yang berhenti saat deadline lewat.
 func AmbilDataDenganDeadline(ctxInduk context.Context, id int64) (string, error) {
 	ctx, cancel := context.WithTimeout(ctxInduk, 2*time.Second)
-	defer cancel() // WAJIB, bahkan kalau operasi selesai lebih cepat dari 2 detik
+	defer cancel() // wajib, bahkan kalau operasi selesai lebih cepat dari 2 detik
 
-	hasil := make(chan string, 1)
-	errCh := make(chan error, 1)
+	v, err := operasiLambat(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("ambil data %d: %w", id, err)
+	}
+	return v, nil
+}
 
+// operasiLambat mensimulasikan operasi yang menghormati ctx.
+func operasiLambat(ctx context.Context, id int64) (string, error) {
+	select {
+	case <-time.After(500 * time.Millisecond):
+		return fmt.Sprintf("data-%d", id), nil
+	case <-ctx.Done():
+		// ctx.Err() berupa context.DeadlineExceeded (timeout habis)
+		// atau context.Canceled (induk dibatalkan lebih dulu).
+		return "", ctx.Err()
+	}
+}
+
+// AmbilDariLibraryLama menunjukkan pola untuk operasi yang TIDAK menerima
+// context. Pemanggil bisa berhenti menunggu saat deadline lewat, tapi
+// operasinya sendiri tetap berjalan sampai selesai di goroutine-nya.
+// Buffer 1 pada channel memastikan goroutine itu tetap bisa mengirim dan
+// selesai, alih-alih bocor selamanya karena tidak ada yang menerima.
+func AmbilDariLibraryLama(ctx context.Context, id int64, panggil func(int64) (string, error)) (string, error) {
+	type hasil struct {
+		nilai string
+		err   error
+	}
+	ch := make(chan hasil, 1)
 	go func() {
-		// simulasi operasi yang BISA lambat (query database sungguhan)
-		time.Sleep(500 * time.Millisecond)
-		hasil <- fmt.Sprintf("data-%d", id)
+		v, err := panggil(id)
+		ch <- hasil{nilai: v, err: err}
 	}()
 
 	select {
-	case v := <-hasil:
-		return v, nil
-	case err := <-errCh:
-		return "", err
+	case h := <-ch:
+		if h.err != nil {
+			return "", fmt.Errorf("panggil library lama untuk %d: %w", id, h.err)
+		}
+		return h.nilai, nil
 	case <-ctx.Done():
-		// ctx.Err() akan berupa context.DeadlineExceeded (timeout habis)
-		// atau context.Canceled (parent dibatalkan sebelum timeout)
-		return "", fmt.Errorf("ambil data %d: %w", id, ctx.Err())
+		return "", fmt.Errorf("menunggu library lama untuk %d: %w", id, ctx.Err())
 	}
 }
 ```
@@ -135,7 +160,7 @@ Context timeout yang terlalu ketat bisa membatalkan operasi yang sebenarnya hany
 > Meluncurkan goroutine untuk melayani sebuah request tanpa meneruskan context request itu ke dalamnya — goroutine terus bekerja meski request yang memicunya sudah dibatalkan atau selesai, memboroskan resource untuk hasil yang tidak akan pernah dipakai.
 
 > [!warning] Jebakan
-> Lupa memanggil `cancel()` (tidak memakai `defer cancel()`) setelah membuat context dengan `WithTimeout`/`WithCancel` — goroutine internal context tidak dibersihkan sampai timeout aslinya habis, kebocoran resource kecil yang terakumulasi pada volume tinggi.
+> Lupa memanggil `cancel()` (tidak memakai `defer cancel()`) setelah membuat context dengan `WithTimeout`/`WithCancel` — timer dan pendaftaran context di induknya tidak dilepas sampai induk dibatalkan atau timeout habis, kebocoran kecil yang terakumulasi pada volume tinggi.
 
 > [!warning] Jebakan
 > Meneruskan context tapi tidak pernah memeriksa `ctx.Done()` di titik yang tepat dalam kode yang menerimanya — context yang diteruskan tanpa diperiksa sama sekali tidak memberi manfaat pembatalan apa pun.
@@ -148,7 +173,7 @@ Context timeout yang terlalu ketat bisa membatalkan operasi yang sebenarnya hany
 4. Desain terbuka: handler HTTP-mu memanggil tiga API partner eksternal secara paralel lewat tiga goroutine, mengumpulkan hasilnya lewat channel, lalu mengembalikan response gabungan. Rancang bagaimana context dari request HTTP diteruskan ke ketiga goroutine ini, dan jelaskan apa yang terjadi pada ketiga goroutine itu kalau pengguna menutup koneksinya di tengah proses.
 
 > [!success]- Kunci jawaban
-> **1.** `context.WithTimeout`/`WithCancel` menjalankan mekanisme internal (goroutine dan/atau timer) untuk memantau kapan context harus dibatalkan. Kalau operasi selesai lebih cepat dari timeout tapi `cancel()` tidak dipanggil, mekanisme internal ini **tetap berjalan** menunggu durasi timeout aslinya habis sebelum benar-benar dibersihkan — memanggil `cancel()` segera setelah operasi selesai (lewat `defer`, yang otomatis terpanggil begitu fungsi selesai) memberi tahu runtime untuk membersihkan mekanisme itu **seketika**, tidak perlu menunggu timeout.
+> **1.** Context turunan mendaftarkan dirinya di context induk, dan `WithTimeout`/`WithDeadline` memasang timer. Kalau operasi selesai lebih cepat dari timeout tapi `cancel()` tidak dipanggil, keduanya tetap hidup sampai timer habis atau induknya dibatalkan. Untuk induk yang berumur panjang, context anak yang tertinggal bisa menumpuk tanpa batas. Memanggil `cancel()` lewat `defer` melepas semuanya **seketika** begitu fungsi selesai.
 > **4.** Context dari `*http.Request` (`r.Context()`) diteruskan sebagai parameter pertama ke fungsi yang menjalankan masing-masing dari tiga panggilan API partner — bisa langsung diteruskan (kalau ketiganya harus dibatalkan bersamaan begitu request HTTP selesai/dibatalkan) atau dibungkus lagi dengan `context.WithTimeout` individual (kalau masing-masing partner butuh batas waktu berbeda). Ketiga goroutine menjalankan `select` yang memeriksa `ctx.Done()` di samping menunggu hasil panggilan API. Begitu pengguna menutup koneksinya, Go `net/http` secara otomatis membatalkan context request itu (`r.Context()` yang mendasari) — sinyal pembatalan ini mengalir ke ketiga context turunan yang diteruskan ke tiga goroutine, dan `ctx.Done()` di ketiganya langsung tertutup, memicu ketiga goroutine berhenti lebih awal (asalkan masing-masing benar-benar memeriksa `ctx.Done()` lewat select) alih-alih terus menunggu respons API yang hasilnya sudah tidak berguna.
 
 ## Self-Check

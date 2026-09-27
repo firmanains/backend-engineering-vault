@@ -24,7 +24,7 @@ Kalau isolation level terlalu longgar, laporan bisa membaca saldo rekening tujua
 
 ## Intuition
 
-Bayangkan isolation level seperti **aturan seberapa banyak kamu boleh mengintip pekerjaan orang lain yang belum selesai**, di ruang kerja bersama. Level paling longgar seperti "boleh membaca coretan siapa pun di meja mereka, bahkan yang masih dicoret-coret dan belum final" (`READ UNCOMMITTED`) — cepat, tapi kamu bisa membaca sesuatu yang kemudian dihapus/diubah sebelum orang itu selesai. Level yang lebih ketat seperti "hanya boleh membaca dokumen yang sudah ditandatangani final" (`READ COMMITTED`) — lebih aman, tapi dokumen yang sama bisa saja **berubah** kalau kamu membacanya dua kali dalam sesi kerjamu, karena orang lain sempat menandatangani revisi baru di antaranya. Level paling ketat (`SERIALIZABLE`) lebih mirip **diberi satu salinan cetak dari seluruh ruang kerja, tepat pada saat kamu mulai bekerja** — orang lain terus mengubah papan aslinya, tapi salinanmu tidak ikut berubah, jadi apa pun yang kamu baca berkali-kali selalu sama. Saat kamu menyerahkan hasil kerjamu, ada petugas yang memeriksa apakah perubahan orang lain sementara itu membuat pekerjaanmu jadi tidak konsisten; kalau ya, kamu diminta mengulang dengan salinan yang baru.
+Bayangkan isolation level seperti **aturan seberapa banyak kamu boleh mengintip pekerjaan orang lain yang belum selesai**, di ruang kerja bersama. Level paling longgar seperti "boleh membaca coretan siapa pun di meja mereka, bahkan yang masih dicoret-coret dan belum final" (`READ UNCOMMITTED`) — cepat, tapi kamu bisa membaca sesuatu yang kemudian dihapus/diubah sebelum orang itu selesai. Level yang lebih ketat seperti "hanya boleh membaca dokumen yang sudah ditandatangani final" (`READ COMMITTED`) — lebih aman, tapi dokumen yang sama bisa saja **berubah** kalau kamu membacanya dua kali dalam sesi kerjamu, karena orang lain sempat menandatangani revisi baru di antaranya. `REPEATABLE READ` di InnoDB dan PostgreSQL lebih mirip **diberi satu salinan cetak dari seluruh ruang kerja, tepat pada saat kamu mulai membaca** — orang lain terus mengubah papan aslinya, tapi salinanmu tidak ikut berubah, jadi apa pun yang kamu baca berkali-kali selalu sama. `SERIALIZABLE` menambahkan satu hal: jaminan bahwa hasil akhir semua orang sama seperti kalau mereka bekerja bergiliran. PostgreSQL mewujudkannya dengan petugas yang memeriksa saat kamu menyerahkan hasil kerja, dan memintamu mengulang kalau ada tabrakan; InnoDB mewujudkannya dengan mengunci apa yang kamu baca sehingga orang lain harus menunggu.
 
 Analogi ini bocor pada **biaya salinannya**: database tidak benar-benar menyalin seluruh tabel untuk setiap transaction. Ia hanya menyimpan versi lama dari baris yang memang berubah, dan menyusun "salinan"-mu dari situ saat dibutuhkan — mekanismenya dibahas di [[MVCC]].
 
@@ -36,7 +36,7 @@ Empat isolation level standar SQL, dari paling longgar ke paling ketat:
 |---|---|---|---|
 | `READ UNCOMMITTED` | Bisa membaca data yang belum di-`COMMIT` transaction lain ("dirty read") | Paling murah, paling jarang dipakai serius | — |
 | `READ COMMITTED` | Hanya membaca data yang sudah di-`COMMIT`, tapi nilai bisa berubah antar baca dalam transaction yang sama | Lebih murah dari `REPEATABLE READ` | PostgreSQL |
-| `REPEATABLE READ` | Nilai yang sudah dibaca tetap sama sepanjang transaction, tapi baris **baru** yang cocok kondisi bisa muncul ("phantom read") | Lebih mahal dari `READ COMMITTED` | MySQL/MariaDB (InnoDB) |
+| `REPEATABLE READ` | Nilai yang sudah dibaca tetap sama sepanjang transaction; menurut standar SQL, baris **baru** yang cocok kondisi masih bisa muncul ("phantom read"), meski InnoDB dan PostgreSQL mencegahnya untuk `SELECT` biasa lewat snapshot | Lebih mahal dari `READ COMMITTED` | MySQL/MariaDB (InnoDB) |
 | `SERIALIZABLE` | Transaction berjalan seolah-olah dieksekusi satu per satu secara berurutan, tanpa tumpang tindih sama sekali | Paling ketat, paling mahal | — |
 
 Pembahasan detail anomali (dirty read, non-repeatable read, phantom read, write skew) dan trade-off performa masing-masing level ada di [[Isolation Levels and Their Anomalies]], level intermediate — note ini fokus pada gambaran besar yang wajib dipahami lebih dulu.
@@ -75,25 +75,52 @@ import (
 	"fmt"
 )
 
-// AmbilLaporanSaldoKonsisten secara eksplisit meminta REPEATABLE READ,
-// tidak bergantung pada default mesin database yang sedang dipakai —
-// penting karena kode ini harus berjalan benar di MariaDB maupun PostgreSQL.
-func AmbilLaporanSaldoKonsisten(ctx context.Context, db *sql.DB) (int64, error) {
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+type RingkasanSaldo struct {
+	Total       string            // DECIMAL dibaca sebagai string supaya presisinya utuh
+	PerInstansi map[int64]string
+}
+
+// AmbilLaporanSaldoKonsisten menjalankan DUA query di satu transaction dan
+// secara eksplisit meminta REPEATABLE READ, supaya keduanya melihat snapshot
+// yang sama. (Satu query tunggal sudah konsisten dengan dirinya sendiri di
+// level mana pun; isolation level baru menentukan saat ada lebih dari satu
+// pembacaan dalam satu transaction.)
+func AmbilLaporanSaldoKonsisten(ctx context.Context, db *sql.DB) (*RingkasanSaldo, error) {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
-		return 0, fmt.Errorf("mulai transaction laporan saldo: %w", err)
+		return nil, fmt.Errorf("mulai transaction laporan saldo: %w", err)
 	}
 	defer tx.Rollback()
 
-	var totalSaldo int64
-	if err := tx.QueryRowContext(ctx, "SELECT SUM(saldo) FROM rekening").Scan(&totalSaldo); err != nil {
-		return 0, fmt.Errorf("hitung total saldo: %w", err)
+	r := &RingkasanSaldo{PerInstansi: make(map[int64]string)}
+	// COALESCE: SUM atas tabel kosong menghasilkan NULL, bukan 0.
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(saldo), 0) FROM rekening").Scan(&r.Total); err != nil {
+		return nil, fmt.Errorf("hitung total saldo: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		"SELECT instansi_id, COALESCE(SUM(saldo), 0) FROM rekening GROUP BY instansi_id")
+	if err != nil {
+		return nil, fmt.Errorf("query saldo per instansi: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var saldo string
+		if err := rows.Scan(&id, &saldo); err != nil {
+			return nil, fmt.Errorf("scan saldo per instansi: %w", err)
+		}
+		r.PerInstansi[id] = saldo
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterasi saldo per instansi: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit laporan saldo: %w", err)
+		return nil, fmt.Errorf("commit laporan saldo: %w", err)
 	}
-	return totalSaldo, nil
+	return r, nil
 }
 ```
 

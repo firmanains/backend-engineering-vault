@@ -50,13 +50,13 @@ Diagram ini menunjukkan pembalikan arah pemetaan: alih-alih menyimpan "Dokumen 1
 **Proses membangun inverted index** melibatkan beberapa tahap sebelum kata benar-benar dimasukkan ke index:
 
 1. **Tokenization** — memecah teks jadi kata-kata individual ("sengketa tanah warisan" → `["sengketa", "tanah", "warisan"]`).
-2. **Normalisasi** — mengubah semua ke lowercase, menghapus tanda baca, kadang mengubah kata ke bentuk dasarnya (*stemming*/*lemmatization* — "mengajukan" dan "diajukan" bisa dinormalisasi ke akar kata "ajuk").
+2. **Normalisasi** — mengubah semua ke lowercase, menghapus tanda baca, kadang mengubah kata ke bentuk dasarnya (*stemming*/*lemmatization* — "mengajukan" dan "diajukan" bisa dinormalisasi ke kata dasar "aju").
 3. **Stop word removal** — membuang kata yang sangat umum dan tidak menambah informasi pencarian ("yang", "dan", "di", "ke") — kata-kata ini muncul di hampir semua dokumen sehingga tidak membantu membedakan relevansi.
 4. **Membangun posting list** — untuk setiap kata yang tersisa, mencatat daftar dokumen (dan biasanya juga posisi dalam dokumen, untuk mendukung pencarian frasa) yang mengandungnya.
 
 ## Under The Hood
 
-Analyzer — komponen yang menjalankan seluruh pipeline tokenization-normalisasi-stop word di atas — adalah bagian paling krusial dan paling sering dikonfigurasi ulang di sistem pencarian nyata, karena keputusan di sini secara langsung menentukan kata apa yang dianggap "sama" saat pencarian. Bahasa Indonesia punya tantangan tersendiri untuk stemming (imbuhan awalan-akhiran yang kompleks: "mengajukan", "pengajuan", "diajukan", "ajukan" semua berasal dari kata dasar "ajuk") — analyzer yang tidak menangani morfologi bahasa Indonesia dengan baik bisa gagal mencocokkan dokumen yang secara semantik relevan hanya karena bentuk kata yang berbeda secara literal.
+Analyzer — komponen yang menjalankan seluruh pipeline tokenization-normalisasi-stop word di atas — adalah bagian paling krusial dan paling sering dikonfigurasi ulang di sistem pencarian nyata, karena keputusan di sini secara langsung menentukan kata apa yang dianggap "sama" saat pencarian. Bahasa Indonesia punya tantangan tersendiri untuk stemming (imbuhan awalan-akhiran yang kompleks: "mengajukan", "pengajuan", "diajukan", "ajukan" semua berasal dari kata dasar "aju") — analyzer yang tidak menangani morfologi bahasa Indonesia dengan baik bisa gagal mencocokkan dokumen yang secara semantik relevan hanya karena bentuk kata yang berbeda secara literal.
 
 **Posting list** (daftar dokumen untuk setiap kata) sendiri disimpan dengan struktur yang dioptimalkan untuk operasi himpunan cepat (irisan, gabungan) — sering dikompresi (delta encoding pada ID dokumen yang terurut, mirip semangat kompresi yang dibahas di [[Write Amplification and Compression]]) karena posting list untuk kata umum bisa sangat panjang (jutaan ID dokumen), dan efisiensi penyimpanannya berdampak langsung pada kecepatan operasi irisan/gabungan saat pencarian multi-kata dijalankan.
 
@@ -66,15 +66,13 @@ Analyzer — komponen yang menjalankan seluruh pipeline tokenization-normalisasi
 package searchindex
 
 import (
-	"context"
-	"fmt"
+	"errors"
 	"strings"
 )
 
-// InvertedIndexSederhana mendemonstrasikan PRINSIP inti — bukan
-// implementasi produksi (yang butuh analyzer bahasa, kompresi posting
-// list, dan penyimpanan persisten sungguhan seperti yang disediakan
-// Elasticsearch/Lucene).
+// InvertedIndexSederhana mendemonstrasikan prinsip inti, bukan implementasi
+// produksi (yang butuh analyzer bahasa, posting list terurut dan
+// terkompresi, penyimpanan persisten, serta aman dipakai banyak goroutine).
 type InvertedIndexSederhana struct {
 	index map[string][]int64 // kata -> daftar ID dokumen
 }
@@ -87,36 +85,54 @@ var stopWords = map[string]bool{
 	"yang": true, "dan": true, "di": true, "ke": true, "untuk": true,
 }
 
-// Indeks memproses satu dokumen lewat tokenization, normalisasi, dan
-// stop word removal SEBELUM menambahkannya ke inverted index — urutan
-// ini menentukan kata apa yang benar-benar bisa dicari nantinya.
-func (idx *InvertedIndexSederhana) Indeks(ctx context.Context, dokumenID int64, teks string) {
-	kata := strings.Fields(strings.ToLower(teks))
-	for _, k := range kata {
-		k = strings.Trim(k, ".,!?")
+// analisis adalah analyzer mini: tokenization, lowercase, buang tanda baca,
+// buang stop word. Fungsi yang sama wajib dipakai saat indexing dan saat
+// mencari. Kalau keduanya berbeda, kata yang tersimpan di index tidak akan
+// pernah cocok dengan kata yang dicari.
+func analisis(teks string) []string {
+	var hasil []string
+	for _, k := range strings.Fields(strings.ToLower(teks)) {
+		k = strings.Trim(k, ".,!?;:()\"")
 		if k == "" || stopWords[k] {
 			continue
 		}
+		hasil = append(hasil, k)
+	}
+	return hasil
+}
+
+// Indeks menambahkan satu dokumen ke inverted index. Kata yang muncul
+// berkali-kali di dokumen yang sama hanya dicatat sekali di posting list.
+func (idx *InvertedIndexSederhana) Indeks(dokumenID int64, teks string) {
+	sudah := make(map[string]bool)
+	for _, k := range analisis(teks) {
+		if sudah[k] {
+			continue
+		}
+		sudah[k] = true
 		idx.index[k] = append(idx.index[k], dokumenID)
 	}
 }
 
-// Cari mengembalikan irisan dokumen yang mengandung SEMUA kata pencarian —
-// operasi himpunan pada posting list, bukan pemindaian teks dokumen.
-func (idx *InvertedIndexSederhana) Cari(ctx context.Context, kataKunci []string) ([]int64, error) {
-	if len(kataKunci) == 0 {
-		return nil, fmt.Errorf("kata kunci kosong")
+var ErrKueriKosong = errors.New("kueri tidak mengandung kata yang bisa dicari")
+
+// Cari mengembalikan dokumen yang mengandung semua kata pencarian, lewat
+// irisan posting list, bukan pemindaian teks dokumen.
+func (idx *InvertedIndexSederhana) Cari(kueri string) ([]int64, error) {
+	kata := analisis(kueri)
+	if len(kata) == 0 {
+		return nil, ErrKueriKosong
 	}
 
-	hasil := idx.index[strings.ToLower(kataKunci[0])]
-	for _, k := range kataKunci[1:] {
-		hasil = irisan(hasil, idx.index[strings.ToLower(k)])
+	hasil := idx.index[kata[0]]
+	for _, k := range kata[1:] {
+		hasil = irisan(hasil, idx.index[k])
 	}
 	return hasil, nil
 }
 
 func irisan(a, b []int64) []int64 {
-	set := make(map[int64]bool)
+	set := make(map[int64]bool, len(a))
 	for _, v := range a {
 		set[v] = true
 	}
@@ -132,7 +148,7 @@ func irisan(a, b []int64) []int64 {
 
 ## In His Stack
 
-Elasticsearch, bagian ekosistem kerja yang eksplisit disebut sebagai tool `deep` tier, dibangun di atas Lucene, yang pada dasarnya adalah implementasi inverted index yang sangat matang dan teroptimasi, lengkap dengan analyzer bahasa (termasuk dukungan analyzer bahasa Indonesia lewat plugin komunitas), kompresi posting list, dan mekanisme relevance scoring (dibahas di note berikutnya). Memahami inverted index sebagai konsep menjelaskan **kenapa** Elasticsearch begitu berbeda perilakunya dari MariaDB untuk pencarian teks — bukan sekadar "lebih cepat karena produk lain", tapi karena strukturnya secara fundamental dirancang untuk pola akses ini, sementara MariaDB (meski punya fitur `FULLTEXT` index terbatas) dirancang utamanya untuk pola akses relasional biasa.
+Elasticsearch, bagian ekosistem kerja yang eksplisit disebut sebagai tool `deep` tier, dibangun di atas Lucene, yang pada dasarnya adalah implementasi inverted index yang sangat matang dan teroptimasi, lengkap dengan analyzer bahasa (termasuk analyzer dan stemmer `indonesian` bawaan), kompresi posting list, dan mekanisme relevance scoring (dibahas di note berikutnya). Memahami inverted index sebagai konsep menjelaskan **kenapa** Elasticsearch begitu berbeda perilakunya dari MariaDB untuk pencarian teks — bukan sekadar "lebih cepat karena produk lain", tapi karena strukturnya secara fundamental dirancang untuk pola akses ini, sementara MariaDB dirancang utamanya untuk pola akses relasional biasa. MariaDB sebenarnya juga punya inverted index lewat `FULLTEXT` index dan `MATCH ... AGAINST`. Untuk pencarian sederhana di tabel berukuran sedang, fitur itu layak dicoba lebih dulu sebelum menambah Elasticsearch. Keterbatasannya: tidak ada stemming bahasa Indonesia, stop word bawaannya berbahasa Inggris, kata yang lebih pendek dari panjang minimum tidak diindeks, dan kontrol atas relevansi jauh lebih sedikit.
 
 ## Trade-offs and When Not To Use It
 
@@ -173,7 +189,7 @@ Membangun dan memelihara inverted index bukan gratis — setiap dokumen baru har
 - [[Beyond Relational - Document, Key-Value, Wide-Column, Graph, and Time-Series Stores]] — inverted index adalah salah satu bentuk khusus struktur data "beyond relational" yang dioptimalkan untuk kebutuhan pencarian spesifik.
 - [[Relevance Scoring]] — kelanjutan langsung: menentukan urutan hasil pencarian, bukan sekadar menemukan dokumen yang cocok, dibahas di note berikutnya.
 - [[Keeping Search in Sync with the Source of Truth]] — konsekuensi operasional nyata dari memisahkan sistem pencarian dari database sumber, dibahas di note setelah itu.
-- [[../92 Tools/_Overview|Tools Overview]] — Elasticsearch, implementasi konkret inverted index yang relevan langsung di ekosistem kerja ini, dibahas lebih operasional di tool note-nya.
+- [[../92 Tools/Elasticsearch|Elasticsearch]] — implementasi konkret inverted index (lewat Lucene) yang relevan langsung di ekosistem kerja ini, dibahas lebih operasional di tool note-nya.
 
 ## Further Reading
 

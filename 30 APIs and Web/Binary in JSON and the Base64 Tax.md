@@ -37,14 +37,15 @@ flowchart LR
     Map --> Out["4 karakter output\n(selalu lebih besar ~33%\ndari 3 byte input)"]
 ```
 
-Karena rasio ini **tetap** (4 karakter output untuk setiap 3 byte input), overhead-nya bisa dihitung persis: file 1 MB menjadi kira-kira 1.33 MB setelah di-base64-kan (belum termasuk sedikit tambahan dari tanda kutip string JSON di sekelilingnya, yang biasanya dapat diabaikan). Overhead JSON escaping tambahan biasanya minimal karena alfabet base64 sengaja dipilih memakai karakter yang sudah aman di dalam string JSON.
+Karena rasio ini **tetap** (4 karakter output untuk setiap 3 byte input), overhead-nya bisa dihitung persis: file 1 MB menjadi kira-kira 1.33 MB setelah di-base64-kan (belum termasuk sedikit tambahan dari tanda kutip string JSON di sekelilingnya, yang biasanya dapat diabaikan). Overhead JSON escaping tambahan biasanya minimal karena alfabet base64 sengaja dipilih memakai karakter yang sudah aman di dalam string JSON. Di Go, field bertipe `[]byte` di struct otomatis di-marshal sebagai string base64 oleh `encoding/json`, jadi pajak ini bisa muncul tanpa kamu pernah memanggil `base64` secara eksplisit.
 
 ## In Go
 
 ```go
 func hitungUkuranSetelahBase64(ukuranAsli int) int {
-    // Setiap 3 byte input menjadi 4 karakter output.
-    return int(math.Ceil(float64(ukuranAsli) / 3.0)) * 4
+    // Setiap 3 byte input menjadi 4 karakter output (dibulatkan ke atas,
+    // termasuk padding "="). EncodedLen menghitungnya persis.
+    return base64.StdEncoding.EncodedLen(ukuranAsli)
 }
 
 func encodeDokumenKeBase64(data []byte) string {

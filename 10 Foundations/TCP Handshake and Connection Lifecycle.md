@@ -18,9 +18,9 @@ Sebelum satu byte data pun dikirim, TCP mengharuskan kedua sisi menyepakati kone
 
 ## The Problem
 
-Bayangkan sebuah service Go yang memanggil API partner ratusan kali per menit, tapi setiap pemanggilan membuat `http.Client{}` baru alih-alih memakai satu client yang dipakai ulang. Secara fungsional, kode ini bekerja — setiap request berhasil, response diterima dengan benar. Tapi setelah berjalan beberapa jam, service ini mulai gagal membuka koneksi baru sama sekali, dengan error yang membingungkan seperti "cannot assign requested address".
+Bayangkan sebuah service Go yang memanggil API partner ratusan kali per menit, tapi setiap pemanggilan membuat `http.Transport` baru (sering tersembunyi di dalam helper yang merakit `http.Client` lengkap dengan konfigurasi TLS-nya sendiri) alih-alih memakai satu transport yang dipakai ulang. Secara fungsional, kode ini bekerja — setiap request berhasil, response diterima dengan benar. Tapi setelah berjalan beberapa jam, service ini mulai gagal membuka koneksi baru sama sekali, dengan error yang membingungkan seperti "cannot assign requested address".
 
-Yang terjadi: setiap `http.Client{}` baru berarti koneksi TCP baru yang dibuka dari sebuah *ephemeral port* di sisi client, dipakai sekali, lalu ditutup. Karena service inilah yang memulai penutupan koneksi (biasanya begitu, karena request-response selesai lebih dulu di sisi client), setiap koneksi yang ditutup meninggalkan socket dalam state `TIME_WAIT` selama beberapa waktu sebelum ephemeral port itu benar-benar bisa dipakai ulang. Dengan ratusan koneksi baru per menit dan tidak ada satu pun yang dipakai ulang, jumlah port yang "tertahan" di `TIME_WAIT` menumpuk lebih cepat dari kecepatan mereka dilepas kembali — sampai kehabisan ephemeral port yang tersedia untuk membuka koneksi baru sama sekali.
+Yang terjadi: setiap `http.Transport` baru punya connection pool kosong, jadi setiap panggilan membuka koneksi TCP baru dari sebuah *ephemeral port* baru di sisi client. Koneksi lama tidak pernah dipakai lagi, tapi port-nya juga belum lepas. Ia tertahan di salah satu dari dua tempat: masih terbuka di dalam Transport yang sudah ditinggalkan (lengkap dengan goroutine pembacanya) sampai server menutupnya, atau di state `TIME_WAIT` kalau sisi client yang menutupnya. Dengan ratusan koneksi baru per menit, port yang tertahan menumpuk lebih cepat dari kecepatan mereka dilepas kembali, sampai ephemeral port habis dan koneksi baru tidak bisa dibuka sama sekali.
 
 ## Intuition
 
@@ -59,6 +59,8 @@ sequenceDiagram
 
 Sisi yang mengirim `FIN` pertama kali (dalam kebanyakan kasus request-response singkat, biasanya client, karena client tahu lebih dulu bahwa ia tidak akan mengirim data lagi) adalah sisi yang menahan socketnya di `TIME_WAIT`. Selama periode ini, pasangan alamat IP dan port itu tidak bisa dipakai untuk koneksi baru — ini yang menjadi masalah kalau koneksi baru dibuka dan ditutup dalam volume tinggi tanpa pernah dipakai ulang.
 
+Di client HTTP Go, sisi client yang menutup koneksi lebih dulu terjadi pada beberapa situasi yang umum: keep-alive dimatikan (`DisableKeepAlives: true`), response body tidak dibaca habis lalu ditutup, atau pool idle terlalu kecil untuk tingkat concurrency-nya. Kasus terakhir paling licik. Nilai default `MaxIdleConnsPerHost` di `net/http` adalah 2, jadi kalau 50 goroutine memanggil host yang sama bersamaan, 48 koneksi yang selesai dipakai langsung ditutup oleh client, lalu dibuka ulang di gelombang berikutnya. Hasilnya adalah `TIME_WAIT` yang menumpuk di sisi client meski client-nya sudah dipakai ulang dengan benar.
+
 > [!question] Perlu diverifikasi
 > Klaim: durasi standar `TIME_WAIT` sering disebut "2×MSL (Maximum Segment Lifetime)".
 > Kenapa ragu: nilai MSL dan durasi efektif `TIME_WAIT` bisa dikonfigurasi berbeda antar OS dan bahkan antar versi kernel yang sama, jadi menyebut angka pasti berisiko salah untuk environment tertentu.
@@ -70,8 +72,9 @@ Sisi yang mengirim `FIN` pertama kali (dalam kebanyakan kasus request-response s
 
 ```go
 // Naif: Transport BARU dibuat setiap panggilan. Setiap Transport punya
-// connection pool sendiri, jadi tidak ada koneksi yang bisa dipakai ulang —
-// koneksi TCP dibuka lalu ditutup terus-menerus, dan TIME_WAIT menumpuk.
+// connection pool sendiri, jadi tidak ada koneksi yang bisa dipakai ulang.
+// Setiap panggilan memakai ephemeral port baru, dan koneksi lama tertinggal
+// di Transport yang sudah dibuang sampai server menutupnya.
 func callPartnerNaif(ctx context.Context, url string) ([]byte, error) {
     client := &http.Client{
         Timeout:   5 * time.Second,
@@ -133,7 +136,7 @@ Connection reuse hampir selalu benar untuk service long-running yang memanggil h
 ## Common Mistakes
 
 > [!warning] Jebakan
-> Membuat `http.Client{}` atau `http.Transport{}` baru di dalam function yang dipanggil berulang kali (misalnya di dalam handler HTTP atau di dalam loop), alih-alih membuatnya sekali di level package dan memakainya ulang. Ini meniadakan seluruh manfaat connection pooling yang sebenarnya sudah disediakan `net/http` secara default.
+> Membuat `http.Transport{}` baru (atau `http.Client` yang membawa Transport baru) di dalam function yang dipanggil berulang kali, misalnya di dalam handler HTTP atau di dalam loop, alih-alih membuatnya sekali di level package dan memakainya ulang. Ini meniadakan seluruh manfaat connection pooling. `&http.Client{}` tanpa field `Transport` tidak kena masalah ini karena ia jatuh ke `http.DefaultTransport` yang dibagikan, meski membuatnya berulang tetap tidak ada gunanya.
 
 > [!warning] Jebakan
 > Mengabaikan `resp.Body.Close()` (lihat [[Syscalls and File Descriptors]]) — kalau body tidak dibaca sampai habis dan ditutup, koneksi di baliknya tidak bisa dipakai ulang oleh `http.Transport` untuk request berikutnya, meski secara sintaks kode terlihat sudah "selesai".
@@ -145,11 +148,11 @@ Connection reuse hampir selalu benar untuk service long-running yang memanggil h
 
 1. Sebutkan ketiga langkah dalam three-way handshake TCP dan apa yang disepakati di masing-masing langkah.
 2. Kenapa sisi yang menutup koneksi lebih dulu adalah sisi yang menanggung state `TIME_WAIT`?
-3. Kenapa membuat `http.Client{}` baru di setiap pemanggilan function menghilangkan manfaat connection pooling yang sudah disediakan Go secara default?
+3. Kenapa membuat `http.Transport` baru di setiap pemanggilan function menghilangkan manfaat connection pooling, sementara `&http.Client{}` tanpa field `Transport` tidak?
 4. Desain terbuka: sebuah service Go yang menjadi jembatan integrasi ke lebih dari lima partner instansi pemerintah mulai mengalami error intermiten "cannot assign requested address" saat memanggil salah satu partner, tapi hanya di jam-jam sibuk. Rancang investigasi lengkap untuk memastikan ini benar soal ephemeral port/TIME_WAIT (bukan masalah lain seperti rate limit dari partner), dan rancang perbaikan arsitekturalnya.
 
 > [!success]- Kunci jawaban
-> Investigasi: di server yang mengalami masalah, jalankan `ss -s` atau `netstat -ant | grep TIME_WAIT | wc -l` saat jam sibuk untuk melihat apakah jumlah socket di `TIME_WAIT` memang tinggi dan mendekati batas range ephemeral port yang dikonfigurasi OS. Cross-check dengan kode: apakah pemanggilan ke partner itu memakai `http.Client` yang dipakai ulang, atau dibuat baru setiap request (bug yang dijelaskan di note ini). Kalau terbukti connection pooling tidak dipakai dengan benar, perbaikannya adalah memastikan satu `http.Client`/`http.Transport` per partner dipakai ulang lintas seluruh service (bukan dibuat ulang di setiap goroutine atau request), dengan `MaxIdleConnsPerHost` yang disesuaikan volume panggilan ke partner tersebut. Kalau connection pooling sudah benar dan masalah tetap muncul di volume sangat tinggi, pertimbangkan memperluas range ephemeral port di kernel (`net.ipv4.ip_local_port_range`) sebagai mitigasi tambahan, bukan solusi utama.
+> Investigasi: di server yang mengalami masalah, jalankan `ss -s` atau `netstat -ant | grep TIME_WAIT | wc -l` saat jam sibuk untuk melihat apakah jumlah socket di `TIME_WAIT` memang tinggi dan mendekati batas range ephemeral port yang dikonfigurasi OS. Cross-check dengan kode: apakah pemanggilan ke partner itu memakai `http.Transport` yang dipakai ulang, atau dibuat baru setiap request (bug yang dijelaskan di note ini), dan apakah `MaxIdleConnsPerHost` masih di nilai default yang kecil padahal concurrency ke partner itu tinggi. Kalau terbukti connection pooling tidak dipakai dengan benar, perbaikannya adalah memastikan satu `http.Client`/`http.Transport` per partner dipakai ulang lintas seluruh service (bukan dibuat ulang di setiap goroutine atau request), dengan `MaxIdleConnsPerHost` yang disesuaikan volume panggilan ke partner tersebut. Kalau connection pooling sudah benar dan masalah tetap muncul di volume sangat tinggi, pertimbangkan memperluas range ephemeral port di kernel (`net.ipv4.ip_local_port_range`) sebagai mitigasi tambahan, bukan solusi utama.
 
 ## Self-Check
 

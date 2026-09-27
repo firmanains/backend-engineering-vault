@@ -47,10 +47,7 @@ Diagram ini menunjukkan perbedaan krusial yang diperbaiki di Go 1.14: sebelumnya
 
 Asynchronous preemption (Go 1.14+) diimplementasikan lewat sinyal OS (`SIGURG` di sistem mirip Unix) yang dikirim runtime ke thread (M) yang menjalankan goroutine yang sudah berjalan terlalu lama (melebihi ambang batas, sekitar 10 milidetik) tanpa mencapai titik jeda kooperatif — sinyal ini menginterupsi eksekusi goroutine itu di titik mana pun ia sedang berada, memungkinkan scheduler mengambil alih dan memberi giliran ke goroutine lain. Mekanisme ini jauh lebih rumit diimplementasikan dibanding preemption kooperatif (perlu menangani state CPU yang diinterupsi di titik sembarang dengan benar), tapi menutup celah keadilan penjadwalan yang sebelumnya bisa dieksploitasi (secara tidak sengaja) oleh kode komputasi berat.
 
-> [!question] Perlu diverifikasi
-> Klaim: ambang batas sekitar 10 milidetik dan sinyal `SIGURG` spesifik untuk mekanisme async preemption.
-> Kenapa ragu: ini detail implementasi internal runtime yang didokumentasikan di proposal desain, tapi angka pastinya bisa saja disesuaikan di rilis-rilis berikutnya.
-> Cara verifikasi: proposal desain resmi Go untuk asynchronous preemption (Go issue tracker dan design doc terkait).
+Kedua angka ini bisa dicek langsung di source runtime: konstanta `forcePreemptNS` bernilai 10 ms (`runtime/proc.go`), dan sinyal yang dipakai adalah `sigPreempt = _SIGURG` (`runtime/signal_unix.go`). Keduanya detail implementasi, bukan jaminan bahasa. Untuk melihat perilaku sebelum Go 1.14 di mesin modern, jalankan program dengan `GODEBUG=asyncpreemptoff=1`.
 
 ## In Go
 
@@ -76,6 +73,11 @@ func SimulasiLoopBerat() {
 }
 
 func main() {
+	// Satu P saja, supaya kedua goroutine benar-benar harus bergantian.
+	// Dengan GOMAXPROCS > 1, goroutine kedua cukup berjalan di P lain dan
+	// demonstrasi ini tidak membuktikan apa-apa soal preemption.
+	runtime.GOMAXPROCS(1)
+
 	go SimulasiLoopBerat()
 
 	// Goroutine ini SEHARUSNYA tetap mendapat giliran berkala berkat
@@ -88,8 +90,9 @@ func main() {
 		}
 	}()
 
+	// Jalankan ulang dengan GODEBUG=asyncpreemptoff=1: baris "goroutine
+	// lain" tertahan sampai loop berat selesai atau tidak muncul sama sekali.
 	time.Sleep(2 * time.Second)
-	_ = runtime.NumGoroutine()
 }
 ```
 

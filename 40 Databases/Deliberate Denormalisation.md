@@ -27,7 +27,7 @@ LEFT JOIN permohonan p ON p.instansi_id = i.id
 GROUP BY i.nama;
 ```
 
-Query ini benar dan selalu akurat — tapi begitu tabel `permohonan` bertumbuh sampai jutaan baris, `COUNT()` yang dihitung ulang di **setiap** kunjungan dashboard mulai membebani database secara nyata, terutama saat banyak pengguna membuka dashboard bersamaan di jam sibuk. Tim memutuskan menambahkan kolom `total_permohonan` langsung di tabel `instansi`, di-increment setiap ada permohonan baru (memakai upsert atomik, lihat [[Upserts]]) — dashboard sekarang cukup `SELECT nama, total_permohonan FROM instansi`, tanpa `JOIN` atau agregasi sama sekali. Trade-off yang diterima secara sadar: kalau proses increment gagal di satu titik (misalnya permohonan dihapus lewat jalur lain yang lupa mengurangi counter), `total_permohonan` bisa perlahan menyimpang dari jumlah baris sebenarnya — risiko yang diterima demi performa baca yang jauh lebih baik, dan dimitigasi lewat job rekonsiliasi berkala yang membandingkan `total_permohonan` dengan `COUNT()` sungguhan.
+Query ini benar dan selalu akurat — tapi begitu tabel `permohonan` bertumbuh sampai jutaan baris, `COUNT()` yang dihitung ulang di **setiap** kunjungan dashboard mulai membebani database secara nyata, terutama saat banyak pengguna membuka dashboard bersamaan di jam sibuk. Tim memutuskan menambahkan kolom `total_permohonan` langsung di tabel `instansi`, di-increment secara atomik (`SET total_permohonan = total_permohonan + 1`, prinsip yang sama dengan [[Upserts]]) di transaction yang sama dengan setiap insert permohonan baru — dashboard sekarang cukup `SELECT nama, total_permohonan FROM instansi`, tanpa `JOIN` atau agregasi sama sekali. Trade-off yang diterima secara sadar: kalau proses increment gagal di satu titik (misalnya permohonan dihapus lewat jalur lain yang lupa mengurangi counter), `total_permohonan` bisa perlahan menyimpang dari jumlah baris sebenarnya — risiko yang diterima demi performa baca yang jauh lebih baik, dan dimitigasi lewat job rekonsiliasi berkala yang membandingkan `total_permohonan` dengan `COUNT()` sungguhan.
 
 ## Intuition
 
@@ -39,7 +39,7 @@ Analogi ini bocor pada satu hal: nota kertas di dunia nyata tidak punya cara oto
 
 Tiga pola umum denormalisasi:
 
-**Kolom agregat yang di-cache** (seperti `total_permohonan` di "The Problem") — dijaga sinkron lewat upsert atomik setiap ada perubahan pada data sumbernya.
+**Kolom agregat yang di-cache** (seperti `total_permohonan` di "The Problem") — dijaga sinkron lewat update atomik setiap ada perubahan pada data sumbernya.
 
 ```sql
 UPDATE instansi SET total_permohonan = total_permohonan + 1 WHERE id = ?;
@@ -105,7 +105,7 @@ Laporan bulanan/tahunan di sistem legacy Yii1 sangat sering memakai tabel ringka
 
 ## Trade-offs and When Not To Use It
 
-Denormalisasi menambah kompleksitas nyata: setiap penulisan ke data sumber sekarang punya kewajiban tambahan (menjaga salinan tetap sinkron), dan setiap pembacaan data terdenormalisasi membawa risiko membaca nilai yang sedikit basi. Ini hanya layak dilakukan setelah **mengukur** bahwa versi ternormalisasi benar-benar jadi bottleneck nyata (lihat [[Reading EXPLAIN]] dan profiling performa) — mendenormalisasi secara preemptif "siapa tahu nanti lambat" menambah kompleksitas dan risiko inkonsistensi tanpa manfaat yang terbukti. Untuk data yang jarang dibaca, atau di mana akurasi real-time adalah syarat mutlak (misalnya saldo keuangan), risiko drift denormalisasi biasanya tidak sepadan dengan penghematan performanya.
+Denormalisasi menambah kompleksitas nyata: setiap penulisan ke data sumber sekarang punya kewajiban tambahan (menjaga salinan tetap sinkron), dan setiap pembacaan data terdenormalisasi membawa risiko membaca nilai yang sedikit basi. Ada biaya yang lebih halus lagi pada kolom counter: setiap insert permohonan untuk instansi yang sama kini memperebutkan row lock yang sama di `instansi`, jadi insert yang tadinya bisa berjalan paralel menjadi antre satu per satu di baris itu (hot row). Untuk instansi dengan volume tulis tinggi, ini bisa memindahkan bottleneck dari pembacaan dashboard ke penulisan permohonan. Ini hanya layak dilakukan setelah **mengukur** bahwa versi ternormalisasi benar-benar jadi bottleneck nyata (lihat [[Reading EXPLAIN]] dan profiling performa) — mendenormalisasi secara preemptif "siapa tahu nanti lambat" menambah kompleksitas dan risiko inkonsistensi tanpa manfaat yang terbukti. Untuk data yang jarang dibaca, atau di mana akurasi real-time adalah syarat mutlak (misalnya saldo keuangan), risiko drift denormalisasi biasanya tidak sepadan dengan penghematan performanya.
 
 ## Common Mistakes
 

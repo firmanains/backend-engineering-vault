@@ -31,7 +31,7 @@ Analogi ini bocor pada satu hal: ban berjalan pabrik fisik biasanya bergerak den
 ## How It Works
 
 ```go
-package main
+package etl
 
 import (
 	"context"
@@ -94,9 +94,15 @@ func TahapTransformasi(ctx context.Context, masukan <-chan BarisValid) <-chan Do
 	return keluaran
 }
 
-// JalankanPipeline MERANGKAI ketiga tahap — output satu tahap menjadi
-// input tahap berikutnya, membentuk aliran data lengkap.
-func JalankanPipeline(ctx context.Context, sumber []BarisMentah) {
+// JalankanPipeline merangkai ketiga tahap: output satu tahap menjadi input
+// tahap berikutnya. Context turunan dengan cancel memastikan semua tahap
+// ikut berhenti kalau fungsi ini keluar lebih awal (misalnya karena
+// pengiriman ke Elasticsearch gagal), bukan tertinggal sebagai goroutine
+// yang macet mengirim ke channel yang tidak lagi dibaca.
+func JalankanPipeline(ctxInduk context.Context, sumber []BarisMentah) {
+	ctx, cancel := context.WithCancel(ctxInduk)
+	defer cancel()
+
 	tahap1 := TahapBaca(ctx, sumber)
 	tahap2 := TahapValidasi(ctx, tahap1)
 	tahap3 := TahapTransformasi(ctx, tahap2)
@@ -128,7 +134,13 @@ Diagram ini menunjukkan struktur linear pipeline — setiap panah adalah channel
 Pipeline juga sering dikombinasikan dengan fan-out pada tahap tertentu yang butuh paralelisme lebih (misalnya tahap transformasi yang CPU-intensive):
 
 ```go
-package main
+package etl
+
+import (
+	"context"
+	"fmt"
+	"sync"
+)
 
 // TahapTransformasiParalel menunjukkan KOMBINASI pipeline dengan
 // fan-out/fan-in (lihat Fan-In Fan-Out) — beberapa goroutine transformasi
@@ -189,7 +201,7 @@ Pipeline menambah overhead nyata — setiap tahap adalah goroutine terpisah deng
 
 > [!success]- Kunci jawaban
 > **1.** Setiap tahap adalah goroutine yang berjalan independen, terhubung lewat channel. Begitu tahap pertama selesai memproses item pertama dan mengirimkannya ke channel, ia langsung bisa mulai memproses item **kedua** tanpa menunggu tahap kedua selesai memproses item pertama — tahap kedua mengambil item pertama dari channel dan memprosesnya secara paralel dengan tahap pertama yang sudah bekerja pada item kedua. Ini seperti jalur produksi pabrik: banyak item berada di tahap berbeda secara bersamaan, meski setiap stasiun sendiri hanya mengerjakan satu item pada satu waktu.
-> **4.** Terapkan fan-out khusus pada tahap "kirim ke Elasticsearch" — alih-alih satu goroutine tunggal untuk tahap ini, luncurkan beberapa goroutine (worker pool, lihat [[Worker Pools]]) yang semuanya membaca dari channel yang sama (keluaran tahap validasi) dan mengirim ke Elasticsearch secara paralel. Ini memungkinkan beberapa dokumen dikirim ke Elasticsearch bersamaan alih-alih satu per satu berurutan, mengurangi dampak lambatnya I/O jaringan pada throughput keseluruhan pipeline — jumlah goroutine paralel untuk tahap ini disesuaikan dengan kapasitas Elasticsearch menerima request bersamaan (mirip pertimbangan jumlah worker untuk pekerjaan I/O-bound yang dibahas di [[Worker Pools]]), bukan sekadar angka besar sembarangan.
+> **4.** Terapkan fan-out khusus pada tahap "kirim ke Elasticsearch" — alih-alih satu goroutine tunggal untuk tahap ini, luncurkan beberapa goroutine (worker pool, lihat [[Worker Pools]]) yang semuanya membaca dari channel yang sama (keluaran tahap validasi) dan mengirim ke Elasticsearch secara paralel. Ini memungkinkan beberapa dokumen dikirim ke Elasticsearch bersamaan alih-alih satu per satu berurutan, mengurangi dampak lambatnya I/O jaringan pada throughput keseluruhan pipeline — jumlah goroutine paralel untuk tahap ini disesuaikan dengan kapasitas Elasticsearch menerima request bersamaan (mirip pertimbangan jumlah worker untuk pekerjaan I/O-bound yang dibahas di [[Worker Pools]]), bukan sekadar angka besar sembarangan. Dua hal perlu diperhitungkan. Pertama, sering kali perbaikan terbesar bukan paralelisme, melainkan **batching**: kirim ratusan dokumen dalam satu request `_bulk` Elasticsearch, sehingga biaya round-trip jaringan dibagi ke banyak dokumen. Kedua, pengiriman paralel menghilangkan urutan. Kalau dua versi dokumen yang sama bisa berada di pipeline pada waktu yang sama, versi lama bisa tiba belakangan dan menimpa versi baru; cegah dengan pola "baca keadaan terbaru" (lihat [[../40 Databases/Keeping Search in Sync with the Source of Truth|Keeping Search in Sync with the Source of Truth]]) atau external versioning di Elasticsearch.
 
 ## Self-Check
 

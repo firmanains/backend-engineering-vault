@@ -52,7 +52,7 @@ flowchart TB
 
 Diagram ini menunjukkan kontras bentuk pencarian: full table scan berjalan linear terhadap jumlah baris, sementara pencarian lewat index berjalan logaritmik — perbedaan yang makin dramatis makin besar tabelnya.
 
-Primary key dan (biasanya) `UNIQUE` constraint otomatis membuat index — kamu tidak perlu membuatnya manual untuk kolom itu. Index perlu ditambahkan manual untuk kolom yang **sering dipakai sebagai syarat pencarian** (`WHERE`), **penggabungan** (`JOIN ... ON`), atau **pengurutan** (`ORDER BY`) — tapi tidak setiap kolom seperti itu layak diberi index.
+Primary key dan (biasanya) `UNIQUE` constraint otomatis membuat index — kamu tidak perlu membuatnya manual untuk kolom itu. Foreign key berbeda antar database: InnoDB (MariaDB/MySQL) mewajibkan dan otomatis membuat index di kolom foreign key kalau belum ada, sementara PostgreSQL **tidak** membuatnya otomatis. Di PostgreSQL, kolom foreign key yang tidak di-index adalah penyebab umum `JOIN` yang lambat dan `DELETE` di tabel induk yang memindai seluruh tabel anak. Index perlu ditambahkan manual untuk kolom yang **sering dipakai sebagai syarat pencarian** (`WHERE`), **penggabungan** (`JOIN ... ON`), atau **pengurutan** (`ORDER BY`) — tapi tidak setiap kolom seperti itu layak diberi index.
 
 ## In Go
 

@@ -115,6 +115,8 @@ Menjaga urutan ketat (serial per key atau versioning eksplisit) membawa biaya ny
 
 > [!success]- Kunci jawaban
 > Untuk soal 4: buat peta dari `permohonan_id` ke channel buffered, masing-masing dilayani satu goroutine worker yang memproses pesan dari channel-nya secara serial. Dispatcher utama membaca dari partition Kafka, menentukan `permohonan_id` dari setiap pesan, dan mengirimkannya ke channel yang sesuai (membuat channel dan worker baru kalau `permohonan_id` itu belum punya, dengan mekanisme membersihkan worker yang sudah lama tidak menerima pesan supaya tidak bocor). Karena setiap `permohonan_id` selalu diarahkan ke channel dan worker yang sama, urutan pemrosesan untuk satu permohonan tetap serial, sementara permohonan berbeda diproses oleh worker berbeda secara paralel — paralelisme dibatasi oleh jumlah `permohonan_id` unik yang aktif bersamaan, bukan oleh jumlah pesan mentah.
+>
+> Satu konsekuensi yang wajib ditangani: karena offset bersifat posisional, commit tidak boleh sekadar mengikuti pesan yang selesai paling akhir. Offset hanya boleh di-commit sampai offset **terkecil yang belum selesai** (sering disebut commit watermark). Kalau worker permohonan X lambat memproses offset 105 sementara worker lain sudah menyelesaikan 106–110, commit harus berhenti di 104 sampai 105 selesai.
 
 ## Self-Check
 

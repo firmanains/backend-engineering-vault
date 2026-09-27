@@ -77,10 +77,12 @@ Diagram ini menunjukkan `ROW_NUMBER()` mengulang dari 1 di setiap partisi — pe
 
 `LAG()`/`LEAD()` mengambil nilai dari baris sebelumnya/berikutnya di dalam partisi yang sama — berguna untuk menghitung selisih antar baris berurutan, seperti "berapa hari sejak status permohonan sebelumnya berubah."
 
+Satu detail yang sering menjebak adalah *frame*, yaitu baris mana saja yang ikut dihitung oleh fungsi agregat seperti `SUM() OVER (...)`. Begitu `ORDER BY` ditulis di dalam `OVER` tanpa frame eksplisit, default-nya adalah `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Kata kuncinya `RANGE`: semua baris dengan nilai `ORDER BY` yang **sama** dianggap satu kesatuan. Pada running total per tanggal, tiga baris bertanggal sama akan mendapat total berjalan yang sama (total sampai akhir tanggal itu), bukan naik satu per satu. Kalau yang diinginkan adalah akumulasi per baris, tulis frame-nya secara eksplisit: `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, dan tambahkan kolom unik (misalnya `id`) di `ORDER BY` supaya urutannya deterministik.
+
 ## In Go
 
 ```go
-package main
+package laporan
 
 import (
 	"context"
@@ -132,12 +134,7 @@ func AmbilTigaTercepatPerInstansi(ctx context.Context, db *sql.DB) ([]Permohonan
 
 ## In His Stack
 
-MariaDB baru mendukung window function sejak versi 10.2 — sistem legacy yang masih berjalan di versi lebih lama dari itu tidak punya akses ke fitur ini sama sekali, dan pola "top-N per group" harus disimulasikan lewat correlated subquery atau variabel sesi (`@rank := @rank + 1`), yang jauh lebih rapuh dan sulit dibaca. Kalau kamu mengelola atau berkoordinasi dengan sistem lintas 13+ aplikasi pemerintah, memverifikasi versi MariaDB aktual tiap sistem sebelum mengasumsikan window function tersedia adalah langkah yang layak, bukan formalitas.
-
-> [!question] Perlu diverifikasi
-> Klaim: MariaDB mendukung window function sejak versi 10.2.
-> Kenapa ragu: nomor versi persis mudah salah diingat dan bisa berbeda antara MariaDB dan MySQL (MySQL mendukungnya sejak 8.0, database yang cabangnya berbeda dari MariaDB).
-> Cara verifikasi: changelog resmi MariaDB untuk fitur "window functions", atau jalankan langsung `SELECT VERSION();` lalu cek dokumentasi versi tersebut.
+MariaDB baru mendukung window function sejak versi 10.2 (MySQL sejak 8.0) — sistem legacy yang masih berjalan di versi lebih lama dari itu tidak punya akses ke fitur ini sama sekali, dan pola "top-N per group" harus disimulasikan lewat correlated subquery atau variabel sesi (`@rank := @rank + 1`), yang jauh lebih rapuh dan sulit dibaca. Kalau kamu mengelola atau berkoordinasi dengan sistem lintas 13+ aplikasi pemerintah, memverifikasi versi MariaDB aktual tiap sistem sebelum mengasumsikan window function tersedia adalah langkah yang layak, bukan formalitas.
 
 ## Trade-offs and When Not To Use It
 
@@ -163,7 +160,7 @@ Window function menambah kompleksitas bacaan bagi yang belum terbiasa dengan sin
 
 > [!success]- Kunci jawaban
 > **1.** Untuk data `[10, 20, 20, 30]` diurutkan: `ROW_NUMBER()` menghasilkan `1, 2, 3, 4` (selalu unik, walau nilai 20 muncul dua kali). `RANK()` menghasilkan `1, 2, 2, 4` (dua baris nilai 20 sama-sama peringkat 2, lalu peringkat 3 dilompati). `DENSE_RANK()` menghasilkan `1, 2, 2, 3` (sama-sama peringkat 2, tapi peringkat berikutnya tetap 3, tidak melompat).
-> **4.** `LAG(tanggal_perubahan) OVER (PARTITION BY instansi_id ORDER BY tanggal_perubahan)` mengambil nilai `tanggal_perubahan` dari baris sebelumnya **di dalam partisi instansi yang sama**, lalu selisihnya terhadap baris saat ini dihitung sebagai `tanggal_perubahan - LAG(tanggal_perubahan) OVER (...)`. `LAG()` dipilih dibanding self-join karena self-join butuh syarat penjodohan eksplisit ("baris sebelumnya" harus dicari lewat subquery `MAX(tanggal) WHERE tanggal < tanggal_saat_ini`, per baris), yang jauh lebih mahal secara eksekusi (butuh scan berulang per baris) dan lebih rumit ditulis dibanding `LAG()` yang menyelesaikan pekerjaan "ambil nilai baris sebelumnya dalam urutan partisi" dalam satu ekspresi deklaratif.
+> **4.** `LAG(tanggal_perubahan) OVER (PARTITION BY instansi_id ORDER BY tanggal_perubahan)` mengambil nilai `tanggal_perubahan` dari baris sebelumnya **di dalam partisi instansi yang sama**, lalu selisihnya terhadap baris saat ini dihitung dengan `TIMESTAMPDIFF(MINUTE, LAG(tanggal_perubahan) OVER (...), tanggal_perubahan)` di MariaDB (di PostgreSQL, pengurangan dua `timestamp` menghasilkan `interval`). Jangan mengurangkan dua `DATETIME` langsung di MariaDB: operator `-` mengubah keduanya menjadi angka seperti `20260105093000`, dan selisihnya bukan jumlah detik atau menit. Baris pertama tiap partisi mendapat `NULL` dari `LAG()` karena tidak punya baris sebelumnya. `LAG()` dipilih dibanding self-join karena self-join butuh syarat penjodohan eksplisit ("baris sebelumnya" harus dicari lewat subquery `MAX(tanggal) WHERE tanggal < tanggal_saat_ini`, per baris), yang jauh lebih mahal secara eksekusi (butuh scan berulang per baris) dan lebih rumit ditulis dibanding `LAG()` yang menyelesaikan pekerjaan "ambil nilai baris sebelumnya dalam urutan partisi" dalam satu ekspresi deklaratif.
 
 ## Self-Check
 

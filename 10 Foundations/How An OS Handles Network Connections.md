@@ -119,7 +119,7 @@ Tidak ada trade-off dalam arti "kapan tidak memakai mekanisme ini" — accept qu
 > Menyimpulkan "aplikasi baik-baik saja" hanya dari metrik CPU dan memori, padahal masalah terjadi di accept queue kernel — lapisan yang tidak pernah tersentuh kode aplikasi sama sekali dan tidak muncul di metrik aplikasi biasa.
 
 > [!warning] Jebakan
-> Menyamakan "connection refused" di level accept queue dengan error dari dalam handler aplikasi. Keduanya terlihat identik dari sisi client, tapi yang pertama berarti request tidak pernah sampai ke kode aplikasimu sama sekali — perbaikannya ada di konfigurasi OS/listener, bukan di kode handler.
+> Menyamakan kegagalan di level kernel dengan error dari dalam handler aplikasi. Accept queue yang penuh (dengan setelan default Linux) menghasilkan timeout koneksi di sisi client; port tanpa listener menghasilkan "connection refused". Keduanya berarti request tidak pernah sampai ke kode aplikasimu, jadi perbaikannya ada di konfigurasi OS/listener, bukan di kode handler. Error dari handler justru selalu datang sebagai response HTTP (misalnya `500`), bukan sebagai kegagalan koneksi.
 
 > [!warning] Jebakan
 > Mengira menaikkan jumlah worker/goroutine aplikasi otomatis memperbesar accept queue. Ukuran backlog adalah parameter terpisah di level socket listener dan kernel — menambah worker membantu kecepatan memproses koneksi yang *sudah* di-accept, bukan kapasitas antrean sebelum di-accept.

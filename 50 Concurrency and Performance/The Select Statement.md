@@ -88,7 +88,7 @@ Diagram ini menunjukkan seluruh kemungkinan perilaku `select` — poin paling se
 
 ## Under The Hood
 
-`time.After(d)` yang dipanggil berulang di dalam loop (misalnya di dalam `for { select { ... case <-time.After(d): ... } }`) adalah jebakan performa halus — setiap pemanggilan `time.After` membuat timer **baru**, dan timer lama yang belum sempat "berbunyi" tidak langsung dibersihkan garbage collector sampai durasinya benar-benar habis, berpotensi menumpuk banyak timer aktif kalau loop itu berjalan cepat berulang-ulang. Untuk pola loop berulang dengan timeout yang sama, `time.NewTimer` yang di-reset secara eksplisit (atau `time.NewTicker` untuk interval berulang) adalah pola yang lebih efisien dibanding memanggil `time.After` setiap iterasi.
+`time.After(d)` yang dipanggil berulang di dalam loop (misalnya `for { select { ... case <-time.After(d): ... } }`) punya sejarah yang perlu diketahui karena perilakunya berubah antar versi Go. Sebelum Go 1.23, timer yang dibuat `time.After` tidak bisa dibersihkan garbage collector sampai durasinya habis, sehingga loop yang berputar cepat dengan durasi panjang bisa menumpuk ribuan timer aktif. Sejak Go 1.23 (berlaku kalau baris `go` di `go.mod` bernilai 1.23 atau lebih), timer yang sudah tidak direferensikan bisa langsung dibersihkan meski belum berbunyi. Dokumentasi `time.After` sendiri kini menyatakan tidak ada alasan memilih `NewTimer` kalau `After` sudah memadai. Yang tersisa hanyalah satu alokasi timer per iterasi, yang baru layak dioptimasi dengan `time.NewTimer` + `Reset()` kalau profiler menunjukkannya berarti. Sejak Go 1.23 pula, `Reset` aman dipanggil tanpa ritual `Stop` lalu menguras channel seperti di versi lama.
 
 **`select {}`** kosong tanpa case apa pun adalah idiom yang sengaja memblokir **selamanya** — kadang dipakai di `main()` program yang seluruh pekerjaannya dijalankan goroutine lain dan `main()` hanya perlu tetap hidup tanpa melakukan apa-apa, meski pola `context` atau channel sinyal eksplisit biasanya lebih jelas maksudnya untuk kode production.
 
@@ -127,6 +127,8 @@ func JalankanWorker(ctx context.Context, channelKerja <-chan int) {
 }
 ```
 
+Satu konsekuensi dari pemilihan acak: kalau context sudah dibatalkan **dan** masih ada job yang menunggu di channel, `select` bisa saja memilih job, lalu job berikutnya, dan seterusnya. Worker baru berhenti ketika kebetulan case `ctx.Done()` yang terpilih. Kalau pembatalan harus diprioritaskan, periksa `ctx.Err()` di awal setiap iterasi (atau sebelum memproses job) sebelum masuk ke `select`.
+
 ## In His Stack
 
 Pola `select` dengan `ctx.Done()` di setiap titik yang berpotensi menunggu lama adalah kebiasaan penting untuk kode yang memanggil API partner eksternal — sistem yang menangani integrasi dengan banyak instansi (yang responsnya kadang lambat atau tidak terduga) sangat diuntungkan oleh pola ini, memastikan satu panggilan yang macet ke satu partner tidak menahan resource (goroutine, koneksi) selamanya kalau request yang memicunya sudah dibatalkan atau timeout di sisi pemanggil.
@@ -141,7 +143,7 @@ Pola `select` dengan `ctx.Done()` di setiap titik yang berpotensi menunggu lama 
 > Berasumsi urutan penulisan case di dalam `select` menentukan prioritas — Go memilih secara acak di antara case yang sama-sama siap, tanpa mempedulikan urutan penulisan.
 
 > [!warning] Jebakan
-> Memanggil `time.After(d)` berulang di dalam loop yang berjalan cepat — setiap pemanggilan membuat timer baru yang tidak langsung dibersihkan, berpotensi menumpuk banyak timer aktif; `time.NewTimer`/`Reset` lebih efisien untuk pola berulang.
+> Memanggil `time.After(d)` berulang di dalam loop yang berjalan cepat pada modul dengan `go` di bawah 1.23 — setiap pemanggilan membuat timer baru yang baru bisa dibersihkan setelah durasinya habis, sehingga timer aktif menumpuk. Di Go 1.23+ penumpukan itu hilang, dan `time.After` di dalam loop menjadi pilihan yang wajar untuk kebanyakan kode.
 
 > [!warning] Jebakan
 > Menunggu channel kerja tanpa menyertakan case `ctx.Done()` di `select` yang sama — goroutine bisa terjebak menunggu job yang tidak pernah datang, tidak responsif terhadap pembatalan sampai job berikutnya benar-benar tiba.
@@ -150,18 +152,18 @@ Pola `select` dengan `ctx.Done()` di setiap titik yang berpotensi menunggu lama 
 
 1. Jelaskan apa yang terjadi kalau dua case dalam `select` sama-sama siap bersamaan.
 2. Kenapa `select` dengan `default` tidak pernah memblokir, berbeda dari `select` tanpa `default`?
-3. Kenapa memanggil `time.After` berulang di dalam loop yang berjalan cepat adalah jebakan performa?
+3. Kenapa memanggil `time.After` berulang di dalam loop yang berjalan cepat dulu menjadi jebakan performa, dan apa yang berubah sejak Go 1.23?
 4. Desain terbuka: worker-mu perlu menerima job dari channel kerja, tapi juga perlu berhenti kalau tidak ada job baru selama 30 detik berturut-turut (idle timeout, untuk melepas resource worker yang tidak dipakai), DAN tetap responsif terhadap pembatalan context kapan saja. Rancang struktur `select` yang menangani ketiga kondisi ini sekaligus.
 
 > [!success]- Kunci jawaban
 > **1.** Go memilih salah satu dari case yang siap secara **acak** (pseudo-random, dengan distribusi yang adil) — tidak ada jaminan urutan tertentu akan selalu menang, dan kode yang menulis case dalam urutan tertentu dengan asumsi itu memengaruhi prioritas adalah salah paham terhadap spesifikasi bahasa.
-> **4.** Struktur select di dalam loop: `select { case job, ok := <-channelKerja: ... (proses job, lanjut loop); case <-ctx.Done(): return; case <-time.After(30 * time.Second): fmt.Println("idle timeout, worker berhenti"); return }`. Perhatikan `time.After` di sini dipanggil ulang setiap iterasi loop — untuk kasus ini sebenarnya masuk akal karena setiap iterasi memang butuh timer idle timeout yang "reset" (dihitung ulang dari titik itu), tapi untuk worker dengan volume job sangat tinggi (banyak iterasi per detik), pola yang lebih efisien memakai `time.NewTimer` yang di-`Reset()` secara eksplisit setiap kali job diterima, alih-alih membuat timer baru di setiap iterasi select — trade-off antara kesederhanaan kode (`time.After`) dan efisiensi (`time.NewTimer` + `Reset`) tergantung volume iterasi yang sesungguhnya diharapkan.
+> **4.** Struktur select di dalam loop: `select { case job, ok := <-channelKerja: ... (proses job, lanjut loop); case <-ctx.Done(): return; case <-time.After(30 * time.Second): fmt.Println("idle timeout, worker berhenti"); return }`. Perhatikan `time.After` di sini dipanggil ulang setiap iterasi loop, dan itu memang yang diinginkan: timer idle harus dihitung ulang dari nol setiap kali job diterima. Sejak Go 1.23, pola ini tidak lagi menumpuk timer yang belum berbunyi, jadi ia aman dipakai. Untuk worker dengan volume job sangat tinggi, `time.NewTimer` yang di-`Reset()` setiap kali job diterima menghemat satu alokasi per iterasi; pertimbangkan hanya kalau profiler menunjukkan alokasi itu berarti.
 
 ## Self-Check
 
 - Bagaimana Go memilih case ketika beberapa channel siap bersamaan di `select`?
 - Apa perbedaan `select` dengan dan tanpa `default`?
-- Kenapa `time.After` dalam loop cepat bisa jadi jebakan performa?
+- Apa yang berubah pada perilaku timer `time.After` sejak Go 1.23?
 - Kenapa `select` dengan `ctx.Done()` penting untuk goroutine yang menunggu channel kerja?
 
 ## Connected Notes

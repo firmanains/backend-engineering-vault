@@ -114,41 +114,70 @@ package cache
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 )
 
-// CacheDenganSingleflight menggabungkan cache-aside biasa dengan
-// singleflight — mencegah cache stampede TEPAT pada titik cache miss,
-// di mana banyak request bersamaan sama-sama gagal menemukan cache.
+// Penyimpan adalah abstraksi kecil atas Redis dan database.
+type Penyimpan interface {
+	CekCache(ctx context.Context, key string) (string, bool, error)
+	SimpanCache(ctx context.Context, key, value string, ttl time.Duration) error
+	QueryProfil(ctx context.Context, userID string) (string, error)
+}
+
+// CacheDenganSingleflight menggabungkan cache-aside dengan singleflight,
+// mencegah stampede tepat pada titik cache miss.
 type CacheDenganSingleflight struct {
-	grup singleflight.Group
+	grup   singleflight.Group
+	store  Penyimpan
+	logger *slog.Logger
 }
 
 func (c *CacheDenganSingleflight) AmbilProfil(ctx context.Context, userID string) (string, error) {
-	if v, ada := cekRedis(userID); ada {
+	v, ada, err := c.store.CekCache(ctx, userID)
+	if err != nil {
+		// Redis bermasalah: catat, lalu lanjut ke database.
+		c.logger.Warn("cek cache gagal", "user_id", userID, "error", err)
+	} else if ada {
 		return v, nil
 	}
 
-	// Cache miss — TAPI singleflight memastikan hanya SATU dari banyak
-	// request bersamaan yang benar-benar menjalankan query + simpan cache.
-	hasil, err, _ := c.grup.Do(userID, func() (interface{}, error) {
-		data, err := queryDatabaseProfil(userID)
+	// DoChan (bukan Do) supaya setiap pemanggil tetap bisa menyerah sesuai
+	// context-nya sendiri, tanpa menunggu eksekusi bersama selesai.
+	ch := c.grup.DoChan(userID, func() (any, error) {
+		// Eksekusi bersama tidak boleh memakai ctx milik pemanggil pertama
+		// begitu saja: kalau pemanggil itu membatalkan request-nya, semua
+		// pemanggil lain yang menumpang ikut gagal. WithoutCancel melepas
+		// pembatalan itu, lalu timeout sendiri tetap membatasi durasinya.
+		ctxBersama, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+
+		data, err := c.store.QueryProfil(ctxBersama, userID)
 		if err != nil {
 			return nil, fmt.Errorf("query profil %s: %w", userID, err)
 		}
-		simpanKeRedis(userID, data)
+		if err := c.store.SimpanCache(ctxBersama, userID, data, 5*time.Minute); err != nil {
+			// Gagal menyimpan cache tidak menggagalkan request.
+			c.logger.Warn("simpan cache gagal", "user_id", userID, "error", err)
+		}
 		return data, nil
 	})
-	if err != nil {
-		return "", err
-	}
-	return hasil.(string), nil
-}
 
-func cekRedis(key string) (string, bool)   { return "", false }
-func simpanKeRedis(key, value string)      {}
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return "", res.Err
+		}
+		return res.Val.(string), nil
+	case <-ctx.Done():
+		return "", fmt.Errorf("ambil profil %s: %w", userID, ctx.Err())
+	}
+}
 ```
+
+Dua keputusan di kode ini adalah jebakan `singleflight` yang paling sering terlewat. Pertama, fungsi di dalam `Do`/`DoChan` hanya dijalankan **satu kali**, dengan context dari pemanggil pertama. Kalau fungsi itu langsung memakai `ctx` pemanggil pertama dan pemanggil itu menutup tab browser-nya, seratus pemanggil lain yang menumpang ikut menerima `context canceled`. Kedua, `Do` membuat setiap pemanggil menunggu sampai eksekusi bersama selesai, apa pun deadline masing-masing; `DoChan` dengan `select` memungkinkan setiap pemanggil berhenti menunggu sesuai context-nya sendiri.
 
 ## In His Stack
 
@@ -156,7 +185,7 @@ Cache stampede pada key populer adalah risiko nyata untuk sistem dengan data yan
 
 ## Trade-offs and When Not To Use It
 
-`singleflight` hanya efektif untuk mengurangi duplikasi **dalam satu proses/instance** — kalau aplikasi berjalan sebagai banyak pod/instance (umum di Kubernetes), setiap instance punya `singleflight.Group` sendiri-sendiri, sehingga stampede tetap bisa terjadi **lintas instance** meski masing-masing instance sudah mendeduplikasi permintaan internalnya sendiri. Untuk kebutuhan itu, `singleflight` perlu dikombinasikan dengan mekanisme lain (cache yang di-refresh proaktif sebelum kedaluwarsa, atau locking terdistribusi) — `singleflight` adalah satu lapis pertahanan yang murah dan mudah diterapkan, bukan solusi lengkap untuk seluruh masalah cache stampede pada sistem multi-instance.
+`singleflight` hanya efektif untuk mengurangi duplikasi **dalam satu proses/instance** — kalau aplikasi berjalan sebagai banyak pod/instance (umum di Kubernetes), setiap instance punya `singleflight.Group` sendiri-sendiri. Tapi perhatikan skalanya sebelum menyimpulkan itu masalah: dengan 10 pod, seribu request serentak untuk key yang sama berubah dari seribu query menjadi paling banyak sepuluh. Untuk banyak sistem, sepuluh query itu sudah bisa diterima, dan tidak perlu lock terdistribusi. Untuk kebutuhan itu, `singleflight` perlu dikombinasikan dengan mekanisme lain (cache yang di-refresh proaktif sebelum kedaluwarsa, atau locking terdistribusi) — `singleflight` adalah satu lapis pertahanan yang murah dan mudah diterapkan, bukan solusi lengkap untuk seluruh masalah cache stampede pada sistem multi-instance.
 
 ## Common Mistakes
 

@@ -56,27 +56,27 @@ import "context"
 type Tier int
 
 const (
-	TierCritical  Tier = 1 // TIDAK PERNAH dimatikan
-	TierImportant Tier = 2 // dimatikan HANYA saat tertekan berat
-	TierNiceToHave Tier = 3 // dimatikan LEBIH DULU
+	TierCritical   Tier = 1 // tidak pernah dimatikan
+	TierImportant  Tier = 2 // dimatikan hanya saat tertekan berat
+	TierNiceToHave Tier = 3 // dimatikan lebih dulu
 )
 
-// FeatureRegistry menunjukkan klasifikasi yang DITENTUKAN SEBELUMNYA,
-// disepakati bersama pemangku kepentingan bisnis — BUKAN keputusan
+// FeatureRegistry menunjukkan klasifikasi yang ditentukan sebelumnya,
+// disepakati bersama pemangku kepentingan bisnis, bukan keputusan
 // ad-hoc satu engineer di tengah insiden.
 var FeatureRegistry = map[string]Tier{
-	"pengajuan_permohonan":   TierCritical,
-	"notifikasi_tenggat":     TierImportant, // BUKAN TierNiceToHave!
-	"pencarian_riwayat":      TierImportant,
-	"rekomendasi_terkait":    TierNiceToHave,
-	"statistik_dashboard":    TierNiceToHave,
+	"pengajuan_permohonan": TierCritical,
+	"notifikasi_tenggat":   TierImportant, // bukan TierNiceToHave!
+	"pencarian_riwayat":    TierImportant,
+	"rekomendasi_terkait":  TierNiceToHave,
+	"statistik_dashboard":  TierNiceToHave,
 }
 
-// DegradationLevel menunjukkan AKTIVASI CEPAT — sekali disetujui,
+// DegradationLevel menunjukkan aktivasi cepat: sekali disetujui,
 // mematikan seluruh tier tertentu adalah satu perintah, bukan
 // mematikan fitur satu per satu manual di tengah krisis.
 type DegradationLevel struct {
-	MaxActiveTier Tier // hanya fitur dengan tier <= ini yang AKTIF
+	MaxActiveTier Tier // hanya fitur dengan tier <= ini yang aktif
 }
 
 func IsFeatureActive(feature string, level DegradationLevel) bool {
@@ -87,8 +87,11 @@ func IsFeatureActive(feature string, level DegradationLevel) bool {
 	return tier <= level.MaxActiveTier
 }
 
-func ActivateEmergencyDegradation(ctx context.Context) DegradationLevel {
-	// Aktifkan HANYA fitur kritis — Tier 2 dan 3 dimatikan.
+// ActivateEmergencyDegradation tidak butuh context saat ini, tapi
+// menerimanya sejak awal supaya audit logging atau pemeriksaan otorisasi
+// bisa ditambahkan kelak tanpa mengubah signature fungsi ini.
+func ActivateEmergencyDegradation(_ context.Context) DegradationLevel {
+	// Aktifkan hanya fitur kritis — Tier 2 dan 3 dimatikan.
 	return DegradationLevel{MaxActiveTier: TierCritical}
 }
 ```

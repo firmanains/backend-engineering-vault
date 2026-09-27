@@ -71,12 +71,7 @@ Diagram ini menunjukkan bahwa `-race` bukan sekadar flag opsional kosmetik — i
 
 Race detector Go bekerja berdasarkan algoritma **happens-before** (konsep yang sama yang mendasari [[The Go Memory Model]]). Ia melacak setiap akses baca/tulis ke memori beserta goroutine mana yang melakukannya, dan mendeteksi kapan dua akses ke lokasi memori yang sama terjadi **tanpa** hubungan happens-before yang jelas di antara keduanya (tidak ada mutex, channel, atau mekanisme sinkronisasi lain yang menjamin salah satu terjadi sebelum yang lain). Ini kenapa race detector bisa mendeteksi race condition bahkan pada eksekusi yang **kebetulan** menghasilkan hasil yang benar — ia tidak menunggu hasil salah muncul, ia mendeteksi **potensi** konflik akses berdasarkan pola akses memori itu sendiri.
 
-**Race detector menambah overhead signifikan** — biasanya memperlambat eksekusi 2-10x dan meningkatkan penggunaan memori beberapa kali lipat, karena setiap akses memori butuh pencatatan tambahan untuk analisis happens-before. Ini kenapa `-race` dipakai untuk **testing dan CI**, bukan untuk build production — overhead-nya terlalu besar untuk beban kerja production sungguhan, tapi sepenuhnya bisa diterima untuk menjalankan test suite yang tujuannya memang mendeteksi bug, bukan melayani traffic nyata.
-
-> [!question] Perlu diverifikasi
-> Klaim: race detector memperlambat eksekusi 2-10x.
-> Kenapa ragu: angka overhead ini bisa bervariasi tergantung karakteristik kode yang diuji (seberapa banyak akses memori konkuren yang terjadi); rentang yang disebutkan adalah perkiraan umum, bukan angka pasti untuk semua kasus.
-> Cara verifikasi: dokumentasi resmi Go mengenai race detector, atau mengukur langsung perbedaan waktu eksekusi test suite dengan dan tanpa `-race` pada kode yang relevan.
+**Race detector menambah overhead signifikan.** Dokumentasi resmi Go menyebut bahwa untuk program yang umum, penggunaan memori bisa naik 5–10x dan waktu eksekusi 2–20x, karena setiap akses memori butuh pencatatan tambahan untuk analisis happens-before. Ini kenapa `-race` dipakai untuk **testing dan CI**, bukan untuk build production. Overhead-nya terlalu besar untuk melayani traffic sungguhan, tapi sepenuhnya bisa diterima untuk menjalankan test suite yang tujuannya memang mendeteksi bug.
 
 ## In Go
 
@@ -134,7 +129,7 @@ Race detector menambah overhead yang membuatnya tidak cocok dipakai di build pro
 > Hanya menjalankan `go test` biasa di CI tanpa flag `-race` — race condition yang lolos testing biasa (karena timing yang kebetulan tidak bertabrakan) tidak akan pernah terdeteksi tanpa instrumentasi race detector.
 
 > [!warning] Jebakan
-> Men-deploy binary yang di-build dengan flag `-race` ke production — overhead performanya (2-10x lebih lambat, memori jauh lebih besar) membuatnya sama sekali tidak cocok untuk melayani traffic nyata.
+> Men-deploy binary yang di-build dengan flag `-race` ke production — overhead performanya (menurut dokumentasi Go, 2–20x lebih lambat dan memori 5–10x lebih besar) membuatnya sama sekali tidak cocok untuk melayani traffic nyata.
 
 > [!warning] Jebakan
 > Menganggap "lolos race detector" berarti kode benar-benar bebas race condition selamanya — race detector hanya mendeteksi konflik yang benar-benar teramati selama eksekusi test yang dijalankan; jalur kode yang tidak tercakup test tetap bisa menyembunyikan race condition yang belum pernah terdeteksi.

@@ -94,7 +94,11 @@ func main() {
     // Urutan penting: logging DI LUAR auth, supaya request yang
     // ditolak auth TETAP tercatat di log.
     final := chain(handlerAkhir, loggingMiddleware, authMiddleware)
-    http.ListenAndServe(":8080", final)
+
+    // http.Server eksplisit dengan timeout, bukan http.ListenAndServe polos
+    // (lihat Timeouts in HTTP Servers).
+    srv := &http.Server{Addr: ":8080", Handler: final, ReadHeaderTimeout: 5 * time.Second}
+    log.Fatal(srv.ListenAndServe())
 }
 ```
 

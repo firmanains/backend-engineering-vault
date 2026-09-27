@@ -14,7 +14,7 @@ created: 2026-07-29
 
 ## TL;DR
 
-Cache bukan sekadar "taruh data di Redis supaya cepat" — ada beberapa **pola** berbeda mengenai kapan cache diisi dan kapan database ditulis, masing-masing dengan trade-off konsistensi dan performa yang berbeda. **Cache-aside** (paling umum): aplikasi memeriksa cache dulu, kalau tidak ada baru query database dan mengisi cache; database dan cache ditulis terpisah, sering berarti sesaat keduanya tidak sinkron. **Write-through**: setiap tulisan ke database **langsung** juga menulis ke cache dalam operasi yang sama, menjaga keduanya selalu sinkron dengan biaya latensi tulis yang sedikit lebih tinggi. **Write-behind** (write-back): tulisan **hanya** ke cache dulu, disinkronkan ke database secara asinkron belakangan — latensi tulis tercepat, tapi risiko kehilangan data kalau cache gagal sebelum sinkronisasi selesai.
+Cache bukan sekadar "taruh data di Redis supaya cepat" — ada beberapa **pola** berbeda mengenai kapan cache diisi dan kapan database ditulis, masing-masing dengan trade-off konsistensi dan performa yang berbeda. **Cache-aside** (paling umum): aplikasi memeriksa cache dulu, kalau tidak ada baru query database dan mengisi cache; database dan cache ditulis terpisah, sering berarti sesaat keduanya tidak sinkron. **Write-through**: setiap tulisan ke database **langsung** juga menulis ke cache dalam operasi yang sama, sehingga cache biasanya segar setelah tulisan, dengan biaya latensi tulis yang sedikit lebih tinggi. "Biasanya" di sini penting: tanpa mekanisme tambahan, dua tulisan yang bersamaan tetap bisa meninggalkan cache usang. **Write-behind** (write-back): tulisan **hanya** ke cache dulu, disinkronkan ke database secara asinkron belakangan — latensi tulis tercepat, tapi risiko kehilangan data kalau cache gagal sebelum sinkronisasi selesai.
 
 ## The Problem
 
@@ -78,7 +78,7 @@ Diagram-diagram ini menunjukkan perbedaan inti ketiga pola: cache-aside memisahk
 
 **Cache-aside** adalah pola paling umum dipakai justru karena kesederhanaan dan fleksibilitasnya — cache bisa "kosong" kapan saja (restart, eviction) tanpa merusak apa pun, karena aplikasi selalu punya jalur fallback ke database. Trade-off-nya: ada jendela waktu di antara database berubah dan cache di-invalidasi/diperbarui, di mana pembaca lain bisa melihat data cache yang usang — untuk kebanyakan kasus (data yang toleran staleness beberapa detik) ini sepenuhnya bisa diterima.
 
-**Write-through** menjamin cache tidak pernah usang (selalu sinkron dengan database) dengan mengorbankan latensi tulis — setiap operasi tulis harus menunggu **dua** sistem, bukan satu. Masalah konsistensi yang lebih dalam: kalau tulisan ke database berhasil tapi tulisan ke cache gagal (jaringan terputus, Redis sedang down), sistem harus punya kebijakan jelas — retry, invalidasi cache (bukan update, memaksa cache-aside menyelamatkan situasi di baca berikutnya), atau menggagalkan seluruh operasi. Tanpa kebijakan eksplisit ini, write-through separuh-jalan justru menciptakan inkonsistensi yang sama seperti pola ad-hoc di "The Problem".
+**Write-through** mempersempit jendela staleness dengan mengorbankan latensi tulis (setiap tulisan menunggu **dua** sistem), tapi **tidak menjamin** cache selalu sinkron. Ambil dua request yang mengubah profil yang sama hampir bersamaan. Database menerima A lalu B, sehingga nilai akhirnya B. Tapi dua perintah `SET` ke Redis bisa tiba dengan urutan terbalik, B lalu A, sehingga cache menyimpan A dan terus menyajikan data usang sampai TTL habis. Proses yang mati di antara tulisan database dan tulisan cache juga meninggalkan cache lama. Karena itu banyak tim memilih **menghapus** key setelah menulis database (bukan menimpanya dengan nilai baru): penghapusan yang datang dengan urutan terbalik tetap berujung pada cache kosong, dan pembaca berikutnya mengambil nilai terbaru dari database. Pola hapus ini pun masih punya celah sempit (pembaca yang sedang mengisi cache dengan nilai lama tepat saat penghapusan terjadi), jadi TTL tetap wajib sebagai batas atas staleness. Masalah konsistensi yang lebih dalam: kalau tulisan ke database berhasil tapi tulisan ke cache gagal (jaringan terputus, Redis sedang down), sistem harus punya kebijakan jelas — retry, invalidasi cache (bukan update, memaksa cache-aside menyelamatkan situasi di baca berikutnya), atau menggagalkan seluruh operasi. Tanpa kebijakan eksplisit ini, write-through separuh-jalan justru menciptakan inkonsistensi yang sama seperti pola ad-hoc di "The Problem".
 
 **Write-behind** memberi latensi tulis tercepat (hanya menunggu cache, bukan database), tapi membawa risiko **kehilangan data** yang nyata — kalau cache (atau proses yang menjadwalkan sinkronisasi ke database) gagal sebelum sinkronisasi selesai, perubahan itu hilang selamanya, tidak pernah sampai ke database. Pola ini hanya masuk akal untuk data yang benar-benar bisa menerima risiko kehilangan (metrik non-kritis, log yang bisa direkonstruksi dari sumber lain) — jarang tepat untuk data transaksional yang harus benar-benar tersimpan.
 
@@ -89,60 +89,83 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 )
-
-// AmbilProfilCacheAside menunjukkan pola cache-aside: cek cache dulu,
-// kalau miss, query database, ISI cache untuk permintaan berikutnya.
-func AmbilProfilCacheAside(ctx context.Context, userID string) (Profil, error) {
-	if p, ada := cekCache(userID); ada {
-		return p, nil
-	}
-
-	p, err := queryDatabaseProfil(ctx, userID)
-	if err != nil {
-		return Profil{}, fmt.Errorf("query profil %s: %w", userID, err)
-	}
-
-	simpanKeCache(userID, p) // isi cache SETELAH cache miss
-	return p, nil
-}
-
-// SimpanProfilWriteThrough menunjukkan pola write-through: tulis ke
-// database DAN cache dalam satu operasi, response menunggu KEDUANYA
-// selesai — kebijakan EKSPLISIT diperlukan kalau salah satu gagal.
-func SimpanProfilWriteThrough(ctx context.Context, userID string, p Profil) error {
-	if err := simpanKeDatabase(ctx, userID, p); err != nil {
-		return fmt.Errorf("simpan profil ke database: %w", err)
-	}
-
-	// Kebijakan EKSPLISIT: kalau update cache gagal SETELAH database
-	// berhasil, HAPUS cache (bukan biarkan cache lama/usang tetap ada) —
-	// memaksa pembaca berikutnya jatuh ke cache-aside sebagai fallback.
-	if err := simpanKeCacheAtauHapus(userID, p); err != nil {
-		hapusCache(userID)
-	}
-
-	return nil
-}
 
 type Profil struct{ Nama string }
 
-func cekCache(key string) (Profil, bool)                          { return Profil{}, false }
-func simpanKeCache(key string, p Profil)                          {}
-func simpanKeCacheAtauHapus(userID string, p Profil) error         { return nil }
-func hapusCache(key string)                                       {}
-func queryDatabaseProfil(ctx context.Context, id string) (Profil, error) { return Profil{}, nil }
-func simpanKeDatabase(ctx context.Context, id string, p Profil) error    { return nil }
+// ErrCacheMiss dikembalikan Cache.Ambil kalau key tidak ada.
+var ErrCacheMiss = errors.New("cache miss")
+
+// Cache dan Repo adalah abstraksi kecil atas Redis dan database.
+type Cache interface {
+	Ambil(ctx context.Context, key string) (Profil, error)
+	Simpan(ctx context.Context, key string, p Profil, ttl time.Duration) error
+	Hapus(ctx context.Context, key string) error
+}
+
+type Repo interface {
+	AmbilProfil(ctx context.Context, userID string) (Profil, error)
+	SimpanProfil(ctx context.Context, userID string, p Profil) error
+}
+
+type LayananProfil struct {
+	cache  Cache
+	repo   Repo
+	logger *slog.Logger
+}
+
+// Ambil memakai cache-aside: cek cache dulu; kalau miss, baca database
+// lalu isi cache. Gangguan cache tidak boleh menggagalkan request.
+func (l *LayananProfil) Ambil(ctx context.Context, userID string) (Profil, error) {
+	key := "profil:" + userID
+	p, err := l.cache.Ambil(ctx, key)
+	if err == nil {
+		return p, nil
+	}
+	if !errors.Is(err, ErrCacheMiss) {
+		l.logger.Warn("baca cache gagal, lanjut ke database", "key", key, "error", err)
+	}
+
+	p, err = l.repo.AmbilProfil(ctx, userID)
+	if err != nil {
+		return Profil{}, fmt.Errorf("ambil profil %s: %w", userID, err)
+	}
+	// TTL membatasi berapa lama data usang bisa bertahan, apa pun yang terjadi.
+	if err := l.cache.Simpan(ctx, key, p, 10*time.Minute); err != nil {
+		l.logger.Warn("isi cache gagal", "key", key, "error", err)
+	}
+	return p, nil
+}
+
+// Perbarui menulis database dulu (sumber kebenaran), lalu MENGHAPUS key
+// cache alih-alih menimpanya. Dua penghapusan yang tiba dengan urutan
+// terbalik tetap berujung pada cache kosong; dua SET dengan urutan terbalik
+// bisa meninggalkan nilai lama.
+func (l *LayananProfil) Perbarui(ctx context.Context, userID string, p Profil) error {
+	if err := l.repo.SimpanProfil(ctx, userID, p); err != nil {
+		return fmt.Errorf("simpan profil %s: %w", userID, err)
+	}
+	key := "profil:" + userID
+	if err := l.cache.Hapus(ctx, key); err != nil {
+		// Database sudah benar; cache mungkin usang sampai TTL habis.
+		// Catat supaya bisa dipantau, jangan gagalkan request yang sudah sukses.
+		l.logger.Error("hapus cache gagal setelah update", "key", key, "error", err)
+	}
+	return nil
+}
 ```
 
 ## In His Stack
 
-Cache-aside dengan Redis adalah pola paling umum dan paling aman untuk memulai di kebanyakan sistem — untuk data seperti status permohonan atau profil pengguna yang bisa menerima staleness beberapa detik, cache-aside memberi manfaat performa signifikan dengan kompleksitas paling rendah. Write-through lebih relevan untuk data yang **harus** selalu konsisten antara cache dan sumber (misalnya session data yang dipakai langsung untuk keputusan otorisasi) — staleness sesaat pada data semacam ini bisa berarti keputusan otorisasi yang salah, risiko yang tidak sepadan dengan penghematan latensi cache-aside.
+Cache-aside dengan Redis adalah pola paling umum dan paling aman untuk memulai di kebanyakan sistem — untuk data seperti status permohonan atau profil pengguna yang bisa menerima staleness beberapa detik, cache-aside memberi manfaat performa signifikan dengan kompleksitas paling rendah. Untuk data yang dipakai langsung dalam keputusan otorisasi atau keputusan bisnis penting, pertanyaannya bukan "pola cache mana", melainkan apakah data itu boleh dibaca dari cache sama sekali. Staleness sesaat pada data semacam ini bisa berarti keputusan yang salah. Perhatikan juga perbedaannya: kalau Redis adalah **tempat penyimpanan utama** session (tidak ada salinan lain), Redis di situ bukan cache, dan pola-pola di note ini tidak berlaku.
 
 ## Trade-offs and When Not To Use It
 
-Cache-aside menerima staleness sesaat sebagai trade-off untuk kesederhanaan — tidak cocok untuk data yang butuh konsistensi ketat setiap saat. Write-through menjamin konsistensi tapi menambah latensi tulis dan kompleksitas menangani kegagalan sebagian (partial failure) antara dua sistem. Write-behind memberi performa tulis terbaik tapi risiko kehilangan data yang nyata — hanya cocok untuk data yang benar-benar bisa ditoleransi hilang. Tidak ada pola yang "selalu benar" — pilihan bergantung pada kebutuhan konsistensi spesifik data yang bersangkutan, dan sistem yang sama seringkali memakai pola berbeda untuk jenis data berbeda, bukan satu pola tunggal untuk semuanya.
+Cache-aside menerima staleness sesaat sebagai trade-off untuk kesederhanaan — tidak cocok untuk data yang butuh konsistensi ketat setiap saat. Write-through mempersempit jendela staleness tapi tidak menjamin konsistensi di bawah tulisan konkuren, dan menambah latensi tulis serta kompleksitas menangani kegagalan sebagian (partial failure) antara dua sistem. Write-behind memberi performa tulis terbaik tapi risiko kehilangan data yang nyata — hanya cocok untuk data yang benar-benar bisa ditoleransi hilang. Tidak ada pola yang "selalu benar" — pilihan bergantung pada kebutuhan konsistensi spesifik data yang bersangkutan, dan sistem yang sama seringkali memakai pola berbeda untuk jenis data berbeda, bukan satu pola tunggal untuk semuanya.
 
 ## Common Mistakes
 
@@ -164,7 +187,7 @@ Cache-aside menerima staleness sesaat sebagai trade-off untuk kesederhanaan — 
 
 > [!success]- Kunci jawaban
 > **1.** Cache-aside: database ditulis langsung, cache **tidak** ditulis saat itu juga — cache hanya diisi belakangan saat ada pembacaan yang mengalami cache miss. Write-through: database dan cache ditulis **bersamaan** dalam satu operasi, tulisan dianggap sukses hanya setelah keduanya selesai. Write-behind: cache ditulis **duluan** dan dianggap sukses seketika, database ditulis **belakangan** secara asinkron oleh proses terpisah.
-> **4.** Untuk (a) status verifikasi dokumen: pakai **write-through**, karena data ini dipakai untuk keputusan lanjutan (misalnya menentukan apakah dokumen bisa diproses ke tahap berikutnya) — staleness bahkan beberapa detik bisa menyebabkan keputusan yang salah (memproses dokumen yang sebenarnya belum lolos verifikasi terbaru). Untuk (b) jumlah total dokumen: pakai **cache-aside** dengan TTL yang cukup panjang (misalnya beberapa menit) — data statistik semacam ini secara inheren toleran staleness, dan kesederhanaan cache-aside (tanpa perlu menjaga sinkronisasi ketat) jauh lebih sepadan dibanding kompleksitas write-through untuk data yang tidak butuh akurasi real-time.
+> **4.** Untuk (a) status verifikasi dokumen: keputusan lanjutan (misalnya boleh tidaknya dokumen masuk tahap berikutnya) sebaiknya **tidak dibaca dari cache sama sekali**, melainkan dari database, idealnya di dalam transaction yang sama dengan aksi yang diputuskan. Pola cache apa pun, termasuk write-through, punya jendela di mana cache bisa usang (tulisan konkuren yang tiba terbalik, proses mati di tengah jalan). Kalau status yang sama juga ditampilkan di dashboard, bagian tampilan itu boleh memakai cache-aside dengan TTL pendek dan penghapusan key setiap kali status berubah, karena staleness beberapa detik di layar tidak mengubah keputusan apa pun. Untuk (b) jumlah total dokumen: pakai **cache-aside** dengan TTL yang cukup panjang (misalnya beberapa menit). Data statistik semacam ini secara inheren toleran staleness, dan kesederhanaan cache-aside jauh lebih sepadan dibanding kompleksitas menjaga sinkronisasi ketat.
 
 ## Self-Check
 
@@ -183,7 +206,8 @@ Cache-aside menerima staleness sesaat sebagai trade-off untuk kesederhanaan — 
 
 ## Further Reading
 
-- Materi resmi AWS/Azure/GCP mengenai pola caching (cache-aside, write-through, write-behind) — banyak vendor cloud mendokumentasikan pola ini sebagai referensi arsitektur umum.
+- Microsoft Azure Architecture Center, "Cache-Aside pattern" — penjelasan pola cache-aside beserta pertimbangan konsistensinya.
+- Martin Kleppmann, *Designing Data-Intensive Applications*, bab tentang derived data — kerangka berpikir yang memperlakukan cache sebagai salinan turunan dari sumber kebenaran.
 
 ## Catatan Saya
 

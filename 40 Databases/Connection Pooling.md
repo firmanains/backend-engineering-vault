@@ -37,7 +37,8 @@ db, err := sql.Open("mysql", dsn)
 // saat query pertama benar-benar dijalankan (lazy).
 
 db.SetMaxOpenConns(25)   // batas atas jumlah koneksi TERBUKA sekaligus (idle + sedang dipakai)
-db.SetMaxIdleConns(25)   // jumlah koneksi yang tetap dipertahankan menganggur, siap dipakai ulang
+db.SetMaxIdleConns(25)   // jumlah koneksi menganggur yang dipertahankan; default-nya hanya 2, sehingga
+                         // di bawah beban konkuren koneksi terus ditutup-buka (churn)
 db.SetConnMaxLifetime(5 * time.Minute) // paksa koneksi ditutup dan dibuka ulang setelah durasi ini
 db.SetConnMaxIdleTime(2 * time.Minute) // tutup koneksi yang sudah menganggur terlalu lama
 ```
@@ -95,7 +96,7 @@ func BukaKoneksiDatabase(ctx context.Context, dsn string) (*sql.DB, error) {
 
 ## In His Stack
 
-Yii2 secara default membuka **satu koneksi PDO per request** (siklus hidup PHP tradisional: satu proses menangani satu request, lalu berakhir) — model yang secara fundamental berbeda dari `*sql.DB` Go yang **hidup selama proses aplikasi berjalan** dan dipakai ulang lintas ribuan request berturut-turut. Ini kontras arsitektural yang penting dipahami saat berpindah dari mengelola sistem Yii2/PHP ke menulis service Go: konsep connection pooling ada di kedua dunia (PHP punya ekstensi seperti `pgbouncer` di sisi database atau PHP-FPM connection reuse dalam kondisi tertentu), tapi cara berpikirnya berbeda — di Go, ukuran pool adalah keputusan konfigurasi eksplisit di level aplikasi yang perlu disesuaikan dengan siklus hidup service yang panjang, bukan implisit per-request seperti kebanyakan setup PHP tradisional.
+Yii2 secara default membuka **satu koneksi PDO per request** (siklus hidup PHP tradisional: satu proses menangani satu request, lalu berakhir) — model yang secara fundamental berbeda dari `*sql.DB` Go yang **hidup selama proses aplikasi berjalan** dan dipakai ulang lintas ribuan request berturut-turut. Ini kontras arsitektural yang penting dipahami saat berpindah dari mengelola sistem Yii2/PHP ke menulis service Go: konsep connection pooling ada di kedua dunia (di PHP lewat persistent connection PDO, `PDO::ATTR_PERSISTENT`, yang dipakai ulang per worker PHP-FPM, atau lewat proxy terpisah di depan database seperti ProxySQL untuk MySQL/MariaDB dan PgBouncer untuk PostgreSQL), tapi cara berpikirnya berbeda — di Go, ukuran pool adalah keputusan konfigurasi eksplisit di level aplikasi yang perlu disesuaikan dengan siklus hidup service yang panjang, bukan implisit per-request seperti kebanyakan setup PHP tradisional.
 
 ## Trade-offs and When Not To Use It
 

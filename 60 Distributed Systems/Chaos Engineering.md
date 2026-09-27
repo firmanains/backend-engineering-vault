@@ -53,7 +53,7 @@ Chaos engineering yang matang selalu berjalan berdampingan dengan [[Error Budget
 package chaos
 
 import (
-	"context"
+	"errors"
 	"math/rand"
 	"time"
 )
@@ -66,12 +66,18 @@ type FaultInjector struct {
 	Enabled            bool    // KILL SWITCH — bisa dimatikan seketika
 }
 
-func (f *FaultInjector) MaybeInjectLatency(ctx context.Context) {
+// ErrChaosInjected adalah sentinel milik package ini sendiri — bukan
+// meminjam error dari package lain (seperti context.DeadlineExceeded)
+// yang bisa membingungkan pemanggil di kode nyata, yang perlu membedakan
+// kegagalan yang SUNGGUHAN dari kegagalan yang SENGAJA disuntikkan.
+var ErrChaosInjected = errors.New("chaos: kegagalan disuntikkan secara sengaja untuk eksperimen")
+
+func (f *FaultInjector) MaybeInjectLatency() {
 	if !f.Enabled {
 		return
 	}
 	if rand.Float64() < f.FailureProbability {
-		// Menyuntikkan latency tambahan, mensimulasikan jaringan lambat
+		// Menyuntikkan latency tambahan, mensimulasikan jaringan lambat.
 		time.Sleep(2 * time.Second)
 	}
 }
@@ -81,17 +87,17 @@ func (f *FaultInjector) MaybeInjectFailure() error {
 		return nil
 	}
 	if rand.Float64() < f.FailureProbability {
-		return context.DeadlineExceeded // simulasi kegagalan terkontrol
+		return ErrChaosInjected
 	}
 	return nil
 }
 
-// Hipotesis EKSPLISIT dicatat sebelum eksperimen — bukan sekadar
+// Hipotesis eksplisit dicatat sebelum eksperimen, bukan sekadar
 // "mari lihat apa yang terjadi" tanpa tujuan jelas.
 type Experiment struct {
-	Hypothesis   string
-	BlastRadius  string // "1 instance dari 5", bukan seluruh cluster
-	Rollback     func()
+	Hypothesis  string
+	BlastRadius string // "1 instance dari 5", bukan seluruh cluster
+	Rollback    func()
 }
 ```
 

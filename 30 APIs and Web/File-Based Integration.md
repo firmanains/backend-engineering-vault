@@ -116,6 +116,8 @@ func ProsesFileDenganProgress(ctx context.Context, pathFile string, barisTerakhi
 }
 ```
 
+Dua batasan contoh berbasis baris ini perlu diketahui sebelum dipakai untuk CSV sungguhan. Pertama, `bufio.Scanner` punya batas panjang token bawaan (64 KB); baris yang lebih panjang membuat `scanner.Err()` mengembalikan `bufio.ErrTooLong`, kecuali batasnya dinaikkan lewat `scanner.Buffer`. Kedua, CSV yang sah boleh berisi baris baru di dalam field yang diberi tanda kutip (misalnya kolom alamat multi-baris). Pembacaan per baris akan memotong record seperti itu jadi dua. Untuk CSV sungguhan, pakai `encoding/csv` dan catat progress per **record**, bukan per baris fisik.
+
 ## In His Stack
 
 File-based integration lewat SFTP tetap menjadi metode utama pertukaran data dengan banyak instansi pemerintah yang sistemnya belum modernisasi API — ini bukan kegagalan teknis yang harus "diperbaiki" secara sepihak, tapi realita operasional yang harus ditangani dengan reliabilitas yang sama seriusnya seperti integrasi API modern. Verifikasi checksum dan pencatatan progress yang dibahas di note ini seringkali menjadi selisih antara proses batch yang "kadang aneh datanya" dan yang benar-benar bisa diandalkan, terutama untuk data yang berdampak pada keputusan legal/administratif.

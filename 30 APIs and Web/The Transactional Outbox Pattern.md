@@ -55,7 +55,7 @@ Dua cara umum mengimplementasikan message relay:
 
 **Polling** — proses terpisah secara berkala men-query tabel outbox untuk baris yang belum terkirim, mem-publish-nya, lalu menandainya terkirim (atau menghapusnya). Sederhana diimplementasikan, tapi menambah beban query berulang ke database dan punya latency sebesar interval polling.
 
-**Change Data Capture (CDC)** — alat seperti Debezium membaca **binlog/WAL** database secara langsung (log internal yang mencatat setiap perubahan baris, dibahas di [[MVCC]]) dan mem-publish perubahan pada tabel outbox ke Kafka nyaris real-time, tanpa membebani database dengan query polling berulang. Lebih kompleks operasionalnya, tapi jauh lebih efisien dan lebih rendah latency untuk skala besar.
+**Change Data Capture (CDC)** — alat seperti Debezium membaca **binlog/WAL** database secara langsung (log internal yang mencatat setiap perubahan baris, dibahas di [[../60 Distributed Systems/Change Data Capture|Change Data Capture]]) dan mem-publish perubahan pada tabel outbox ke Kafka nyaris real-time, tanpa membebani database dengan query polling berulang. Lebih kompleks operasionalnya, tapi jauh lebih efisien dan lebih rendah latency untuk skala besar.
 
 ## In Go
 
@@ -144,7 +144,7 @@ Transactional outbox menambah kompleksitas nyata: satu tabel tambahan, satu pros
 4. **(Open-ended)** Timmu memutuskan menjalankan dua instance message relay untuk redundansi (kalau satu instance mati, yang lain tetap memproses). Rancang mekanisme yang mencegah kedua instance mem-publish baris outbox yang sama secara bersamaan, dan jelaskan trade-off pendekatan yang kamu pilih.
 
 > [!success]- Kunci jawaban
-> Untuk soal 4: pakai `SELECT ... FOR UPDATE SKIP LOCKED` saat mengambil baris outbox yang belum terkirim — instance pertama yang mengunci sebuah baris membuat instance kedua otomatis melewati baris itu (bukan menunggu) dan mengambil baris lain yang belum terkunci. Ini memastikan setiap baris hanya diproses satu instance pada satu waktu tanpa perlu koordinasi eksternal (seperti leader election). Trade-off-nya: pola ini butuh database yang mendukung `SKIP LOCKED` (PostgreSQL dan MySQL/MariaDB versi cukup baru mendukungnya), dan kalau salah satu instance crash tepat setelah mengunci baris tapi sebelum commit, baris itu terkunci sampai transaksi itu di-rollback atau timeout — jendela waktu singkat di mana baris itu tidak diproses instance manapun.
+> Untuk soal 4: pakai `SELECT ... FOR UPDATE SKIP LOCKED` saat mengambil baris outbox yang belum terkirim — instance pertama yang mengunci sebuah baris membuat instance kedua otomatis melewati baris itu (bukan menunggu) dan mengambil baris lain yang belum terkunci. Ini memastikan setiap baris hanya diproses satu instance pada satu waktu tanpa perlu koordinasi eksternal (seperti leader election). Trade-off-nya: pola ini butuh database yang mendukung `SKIP LOCKED` (PostgreSQL dan MySQL/MariaDB versi cukup baru mendukungnya), dan kalau salah satu instance crash tepat setelah mengunci baris tapi sebelum commit, baris itu terkunci sampai transaksi itu di-rollback atau timeout — jendela waktu singkat di mana baris itu tidak diproses instance manapun (kalau process relay mati, koneksinya putus dan database me-rollback transaksinya, jadi kunci itu biasanya cepat lepas). Trade-off kedua yang lebih halus: dua relay yang memproses baris berbeda secara paralel bisa mem-publish event entitas yang sama keluar dari urutan aslinya (event kedua permohonan X terkirim sebelum event pertamanya). Kalau urutan per entitas penting, pilih salah satu: hanya satu relay aktif (dengan leader election, relay kedua sebagai cadangan), atau bagi baris outbox ke relay berdasarkan key entitas.
 
 ## Self-Check
 
@@ -156,7 +156,7 @@ Transactional outbox menambah kompleksitas nyata: satu tabel tambahan, satu pros
 
 - [[Idempotent Consumers]] — consumer yang menerima event dari outbox tetap harus idempotent, karena message relay sendiri bisa mengirim ulang event yang sama saat gagal di tengah jalan.
 - [[Database Transactions]] — atomicity transaksi database adalah fondasi yang membuat pola outbox bekerja.
-- [[MVCC]] — mekanisme CDC bekerja dengan membaca write-ahead log yang sama dengan yang dibahas untuk MVCC.
+- [[../60 Distributed Systems/Change Data Capture|Change Data Capture]] — cara kerja message relay berbasis CDC (membaca binlog/WAL) dibahas penuh di note itu.
 - [[Locking and Row Locks]] — `SKIP LOCKED` yang dipakai untuk koordinasi antar instance message relay adalah aplikasi langsung dari locking yang dibahas di note itu.
 - [[Dead Letter Queues]] — kelanjutan langsung: apa yang terjadi kalau event dari outbox terus gagal diproses consumer setelah beberapa kali percobaan.
 

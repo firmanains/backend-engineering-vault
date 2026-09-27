@@ -71,6 +71,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -79,18 +81,22 @@ func jalankanConsumer(ctx context.Context, reader *kafka.Reader) error {
 	for {
 		// FetchMessage TIDAK meng-commit offset secara otomatis —
 		// commit dilakukan eksplisit lewat CommitMessages setelah
-		// pemrosesan benar-benar selesai.
+		// pesan benar-benar tuntas ditangani.
 		msg, err := reader.FetchMessage(ctx)
 		if err != nil {
 			return fmt.Errorf("gagal mengambil pesan: %w", err)
 		}
 
-		if err := prosesEventPermohonan(ctx, msg.Value); err != nil {
-			// Jangan commit offset kalau pemrosesan gagal — biarkan
-			// pesan ini diproses ulang oleh consumer yang sama atau
-			// consumer lain setelah rebalancing.
-			fmt.Printf("gagal memproses pesan, akan diulang: %v\n", err)
-			continue
+		if err := prosesDenganRetry(ctx, msg); err != nil {
+			// Offset Kafka bersifat posisional: meng-commit pesan berikutnya
+			// otomatis menganggap pesan ini selesai. Jadi pesan yang gagal
+			// TIDAK boleh dilewati dengan `continue`. Setelah retry habis,
+			// pindahkan ke dead letter queue, baru boleh di-commit.
+			if dlqErr := kirimKeDLQ(ctx, msg, err); dlqErr != nil {
+				// DLQ pun gagal: berhenti tanpa commit, supaya pesan ini
+				// dibaca ulang setelah restart atau rebalancing.
+				return fmt.Errorf("proses gagal (%v) dan kirim DLQ gagal: %w", err, dlqErr)
+			}
 		}
 
 		if err := reader.CommitMessages(ctx, msg); err != nil {
@@ -98,9 +104,28 @@ func jalankanConsumer(ctx context.Context, reader *kafka.Reader) error {
 		}
 	}
 }
+
+func prosesDenganRetry(ctx context.Context, msg kafka.Message) error {
+	const percobaanMaks = 3
+	var errTerakhir error
+	for percobaan := 1; percobaan <= percobaanMaks; percobaan++ {
+		if errTerakhir = prosesEventPermohonan(ctx, msg.Value); errTerakhir == nil {
+			return nil
+		}
+		log.Printf("proses offset %d gagal (percobaan %d): %v", msg.Offset, percobaan, errTerakhir)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(percobaan) * time.Second):
+		}
+	}
+	return errTerakhir
+}
 ```
 
-Pola ini — proses dulu, commit belakangan, hanya setelah pemrosesan benar-benar berhasil — adalah dasar dari **at-least-once delivery**, dibahas lebih lanjut sebagai kelas jaminan pengiriman di [[Delivery Semantics]]. Konsekuensinya: `prosesEventPermohonan` harus **idempotent** — aman dijalankan berkali-kali untuk pesan yang sama tanpa efek samping ganda — karena rebalancing atau restart bisa membuat pesan yang sama diproses lebih dari sekali, prinsip yang dibahas mendalam di [[Idempotent Consumers]].
+Hal yang paling sering salah dipahami di sini: offset Kafka bersifat **posisional**, bukan per pesan. Meng-commit offset pesan ke-101 berarti menyatakan pesan ke-100 dan semua sebelumnya sudah selesai. Karena itu, pesan yang gagal tidak bisa "dilewati dulu lalu diulang nanti" dengan `continue`; begitu pesan berikutnya berhasil dan di-commit, pesan yang gagal hilang dari sudut pandang consumer group. Pilihannya hanya dua: coba lagi di tempat sampai berhasil, atau pindahkan ke [[Dead Letter Queues|dead letter queue]] lalu commit.
+
+Pola ini — proses dulu, commit belakangan, hanya setelah pesan benar-benar tuntas ditangani — adalah dasar dari **at-least-once delivery**, dibahas lebih lanjut sebagai kelas jaminan pengiriman di [[Delivery Semantics]]. Konsekuensinya: `prosesEventPermohonan` harus **idempotent** — aman dijalankan berkali-kali untuk pesan yang sama tanpa efek samping ganda — karena rebalancing atau restart bisa membuat pesan yang sama diproses lebih dari sekali, prinsip yang dibahas mendalam di [[Idempotent Consumers]].
 
 ## In His Stack
 

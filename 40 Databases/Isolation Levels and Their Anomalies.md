@@ -18,7 +18,9 @@ created: 2026-07-29
 
 ## The Problem
 
-Dua petugas membuka form yang sama untuk memperbarui status permohonan hampir bersamaan. Petugas A membaca status permohonan sebagai "menunggu", memutuskan untuk mengubahnya jadi "diverifikasi", dan menyimpan. Petugas B, yang membaca status permohonan **sebelum** perubahan petugas A ter-`commit`, juga melihat "menunggu", memutuskan mengubahnya jadi "ditolak" berdasarkan alasan berbeda, dan menyimpan setelah petugas A. Hasil akhirnya "ditolak" menimpa "diverifikasi" tanpa satu pun dari kedua petugas menyadari ada perubahan lain yang terjadi di antaranya — bukan karena mereka lalai, tapi karena isolation level yang dipakai tidak cukup ketat untuk mendeteksi bahwa data yang mereka baca berpotensi sudah usang di titik mereka menyimpan. Anomali ini punya nama: **lost update** — perubahan petugas A hilang begitu saja, ditimpa tanpa terdeteksi.
+Dua worker memproses permohonan yang sama hampir bersamaan. Worker A menjalankan transaction: membaca status permohonan ("menunggu"), memutuskan mengubahnya jadi "diverifikasi", lalu menyimpan. Worker B, yang membaca status **sebelum** perubahan A ter-`commit`, juga melihat "menunggu", memutuskan "ditolak" berdasarkan alasan berbeda, dan menyimpan setelah A. Hasil akhirnya "ditolak" menimpa "diverifikasi", dan tidak ada yang tahu ada perubahan lain di antaranya. Anomali ini bernama **lost update**: perubahan A hilang, ditimpa tanpa terdeteksi.
+
+Versi yang lebih umum di aplikasi web punya jebakan tambahan. Kalau dua *petugas* membuka form yang sama di browser, lalu menyimpan beberapa menit kemudian, bacaan dan penulisan terjadi di dua HTTP request terpisah. Tidak ada satu transaction pun yang membentang dari "form dibuka" sampai "form disimpan", jadi **tidak ada isolation level yang bisa menolong**. Yang menolong di kasus itu adalah optimistic locking dengan kolom versi (lihat [[Locking and Row Locks]]), yang di Yii2 tersedia lewat `optimisticLock()`.
 
 Skenario kedua yang lebih halus, dikenal sebagai **write skew**: dua dokter jaga di rumah sakit, aturan bisnis mengatakan minimal satu dokter harus tetap "on call" setiap saat. Dokter A memeriksa: "apakah ada dokter lain yang on call selain saya?" — melihat dokter B masih on call, memutuskan aman untuk dirinya sendiri keluar dari status on call. Nyaris bersamaan, dokter B melakukan pemeriksaan yang sama — melihat dokter A masih on call, memutuskan dirinya juga aman untuk keluar. Kedua transaction ini, dilihat secara terpisah, **masing-masing valid** menurut kondisi yang mereka baca — tapi hasil akhirnya melanggar aturan bisnis (tidak ada dokter yang on call sama sekali), karena masing-masing transaction memeriksa kondisi yang dipengaruhi keputusan transaction lain yang belum terlihat saat pemeriksaan dilakukan. Ini adalah anomali yang **tidak** dicegah oleh `REPEATABLE READ` sekalipun — hanya `SERIALIZABLE` (atau penguncian eksplisit) yang benar-benar menutupnya.
 
@@ -42,14 +44,9 @@ Analogi ini bocor pada satu hal penting: whiteboard fisik hanya punya satu "vers
 | `REPEATABLE READ` | Dicegah | Dicegah | Mungkin* | **Tergantung mesin\*\*** | Mungkin |
 | `SERIALIZABLE` | Dicegah | Dicegah | Dicegah | **Dicegah** | Dicegah |
 
-*Catatan penting: standar SQL mengizinkan phantom read di `REPEATABLE READ`, tapi implementasi InnoDB (MySQL/MariaDB) di level `REPEATABLE READ` **secara praktis mencegah** sebagian besar kasus phantom read lewat mekanisme *next-key locking* — sebuah penyimpangan dari standar yang justru menguntungkan, tapi juga sumber kebingungan karena nama level yang sama tidak menjamin perilaku identik lintas mesin database.
+*Standar SQL mengizinkan phantom read di `REPEATABLE READ`, tapi InnoDB dan PostgreSQL sama-sama mencegahnya untuk **bacaan biasa**. Keduanya membaca dari snapshot yang diambil di awal transaction ([[MVCC]]), jadi baris yang di-`INSERT` transaction lain tidak terlihat. Nuansanya ada di InnoDB: *locking read* (`SELECT ... FOR UPDATE`, `UPDATE`, `DELETE`) tidak membaca snapshot, melainkan versi terbaru yang sudah di-`commit`. InnoDB memasang *next-key lock* (kunci pada baris sekaligus celah di sekitarnya) supaya transaction lain tidak bisa menyisipkan baris ke rentang itu. Akibatnya, dalam satu transaction InnoDB, `SELECT` biasa dan `UPDATE` dengan `WHERE` yang sama bisa "melihat" jumlah baris yang berbeda. Satu catatan lagi untuk PostgreSQL: `READ UNCOMMITTED` di sana diperlakukan sama dengan `READ COMMITTED`, jadi dirty read tidak pernah terjadi.
 
 \*\* Lost update adalah contoh paling jelas bahwa nama isolation level yang sama tidak menjamin perilaku yang sama. Pada `REPEATABLE READ`, PostgreSQL membatalkan transaction kedua dengan serialization failure (aplikasi wajib retry), sementara InnoDB membiarkan pola "baca dulu di aplikasi, lalu `UPDATE` berdasarkan nilai yang dibaca" tetap saling menimpa. Pertahanan yang berlaku di kedua mesin: `SELECT ... FOR UPDATE` sebelum membaca, atau `UPDATE` bersyarat yang menyertakan nilai lama di `WHERE` (optimistic locking).
-
-> [!question] Perlu diverifikasi
-> Klaim: InnoDB `REPEATABLE READ` mencegah sebagian besar phantom read lewat next-key locking, menyimpang dari standar SQL yang mengizinkannya di level ini.
-> Kenapa ragu: perilaku ini spesifik dialek dan detail mekanismenya (next-key locking) cukup rumit dengan banyak kasus tepi tergantung jenis query (SELECT biasa vs SELECT FOR UPDATE); klaim umum ini benar secara garis besar tapi detail persisnya sebaiknya diverifikasi ulang.
-> Cara verifikasi: dokumentasi resmi MySQL/InnoDB bagian "Locking Reads" dan "Consistent Nonlocking Reads".
 
 ```mermaid
 sequenceDiagram
@@ -72,7 +69,7 @@ Diagram ini menunjukkan **write skew**: tidak ada satu baris pun yang dibaca dua
 
 `SERIALIZABLE` di PostgreSQL diimplementasikan lewat **Serializable Snapshot Isolation (SSI)** — bukan dengan mengunci semuanya secara kaku seperti namanya mungkin menyiratkan, melainkan dengan mendeteksi pola dependensi antar transaction yang **berpotensi** menghasilkan hasil yang tidak mungkin terjadi kalau transaction-transaction itu benar-benar dijalankan berurutan satu per satu — dan membatalkan (memaksa rollback) salah satu transaction yang terlibat kalau pola berbahaya itu terdeteksi, memaksa aplikasi untuk **retry**. Ini konsekuensi penting: memilih `SERIALIZABLE` bukan hanya soal biaya locking yang lebih tinggi, tapi juga berarti kode aplikasi **harus** siap menangani transaction yang gagal dan perlu diulang — sebuah pola yang jarang dibutuhkan di level isolasi lebih rendah.
 
-MySQL/InnoDB mengimplementasikan `SERIALIZABLE` dengan pendekatan berbeda — secara efektif mengubah setiap `SELECT` biasa menjadi `SELECT ... LOCK IN SHARE MODE` implisit, mengambil shared lock pada setiap baris yang dibaca. Pendekatan ini lebih dekat dengan penguncian pesimistik dibanding pendekatan deteksi-konflik-optimistik ala PostgreSQL SSI — konsekuensinya, `SERIALIZABLE` di InnoDB cenderung meningkatkan **contention** locking (baca saling memblokir tulis) dengan cara yang berbeda dari PostgreSQL yang cenderung meningkatkan **tingkat retry**. Keduanya sama-sama mencegah write skew, tapi lewat mekanisme dan trade-off operasional yang berbeda — detail yang penting untuk memilih strategi retry aplikasi yang tepat tergantung mesin database yang dipakai.
+MySQL/InnoDB mengimplementasikan `SERIALIZABLE` dengan pendekatan berbeda. Selama autocommit dimatikan (yaitu di dalam transaction), InnoDB mengubah setiap `SELECT` biasa menjadi `SELECT ... FOR SHARE` implisit, mengambil shared lock pada setiap baris yang dibaca. Pada skenario dokter jaga, kedua transaction memegang shared lock atas baris satu sama lain, lalu masing-masing mencoba `UPDATE` barisnya sendiri. Hasilnya deadlock, dan InnoDB membatalkan salah satunya dengan error 1213. Pendekatan ini lebih dekat dengan penguncian pesimistik dibanding pendekatan deteksi-konflik-optimistik ala PostgreSQL SSI — konsekuensinya, `SERIALIZABLE` di InnoDB cenderung meningkatkan **contention** locking (baca saling memblokir tulis) dengan cara yang berbeda dari PostgreSQL yang cenderung meningkatkan **tingkat retry**. Keduanya sama-sama mencegah write skew, tapi lewat mekanisme dan trade-off operasional yang berbeda — detail yang penting untuk memilih strategi retry aplikasi yang tepat tergantung mesin database yang dipakai.
 
 ## In Go
 
@@ -90,11 +87,10 @@ import (
 )
 
 // PastikanMinimalSatuDokterOnCall adalah operasi yang rentan write skew kalau
-// dijalankan di bawah REPEATABLE READ biasa — dua transaction yang berjalan
-// bersamaan bisa sama-sama "lolos" pemeriksaan ini padahal hasil akhirnya
-// melanggar aturan bisnis. Kode ini secara eksplisit meminta SERIALIZABLE
-// dan menyiapkan retry, karena SERIALIZABLE bisa memaksa salah satu
-// transaction gagal demi mencegah write skew.
+// dijalankan di bawah REPEATABLE READ biasa: dua transaction yang berjalan
+// bersamaan bisa sama-sama lolos pemeriksaan ini padahal hasil akhirnya
+// melanggar aturan bisnis. Kode ini meminta SERIALIZABLE dan menyiapkan
+// retry, karena SERIALIZABLE bisa memaksa salah satu transaction gagal.
 func PastikanMinimalSatuDokterOnCall(ctx context.Context, db *sql.DB, dokterIDKeluar int64) error {
 	const percobaanMaks = 3
 
@@ -106,15 +102,34 @@ func PastikanMinimalSatuDokterOnCall(ctx context.Context, db *sql.DB, dokterIDKe
 		if !errors.Is(err, errKonflikSerialisasi) {
 			return fmt.Errorf("update status on-call: %w", err)
 		}
-		// Konflik serialisasi terdeteksi — tunggu sebentar lalu coba lagi,
-		// karena database sendiri yang memaksa salah satu transaction gagal
-		// demi mencegah write skew, bukan berarti operasinya salah.
-		time.Sleep(time.Duration(percobaan) * 50 * time.Millisecond)
+		// Konflik serialisasi bukan berarti operasinya salah: database
+		// sengaja menggagalkan salah satu transaction demi mencegah write
+		// skew. Tunggu sebentar (tetap menghormati ctx), lalu ulangi.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("update status on-call dibatalkan: %w", ctx.Err())
+		case <-time.After(time.Duration(percobaan) * 50 * time.Millisecond):
+		}
 	}
 	return fmt.Errorf("gagal update status on-call setelah %d percobaan akibat konflik serialisasi", percobaanMaks)
 }
 
-var errKonflikSerialisasi = errors.New("konflik serialisasi terdeteksi database")
+var (
+	errKonflikSerialisasi = errors.New("konflik serialisasi terdeteksi database")
+	ErrDokterOnCallHabis  = errors.New("minimal satu dokter harus tetap on-call")
+)
+
+// tandaiKonflik menandai error dengan errKonflikSerialisasi kalau SQLSTATE-nya
+// 40001 (serialization_failure). Di PostgreSQL, error ini bisa muncul di
+// statement mana pun di dalam transaction, bukan hanya saat COMMIT, jadi
+// setiap error harus melewati pemeriksaan ini.
+func tandaiKonflik(langkah string, err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "40001" {
+		return fmt.Errorf("%s: %w: %v", langkah, errKonflikSerialisasi, err)
+	}
+	return fmt.Errorf("%s: %w", langkah, err)
+}
 
 func jalankanDalamTransactionSerializable(ctx context.Context, db *sql.DB, dokterIDKeluar int64) error {
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -128,32 +143,25 @@ func jalankanDalamTransactionSerializable(ctx context.Context, db *sql.DB, dokte
 		`SELECT COUNT(*) FROM dokter WHERE on_call = true AND id != $1`, dokterIDKeluar,
 	).Scan(&jumlahOnCallLain)
 	if err != nil {
-		return fmt.Errorf("hitung dokter on-call lain: %w", err)
+		return tandaiKonflik("hitung dokter on-call lain", err)
 	}
 
 	if jumlahOnCallLain < 1 {
-		return fmt.Errorf("minimal satu dokter harus tetap on-call")
+		return ErrDokterOnCallHabis
 	}
 
 	if _, err := tx.ExecContext(ctx, `UPDATE dokter SET on_call = false WHERE id = $1`, dokterIDKeluar); err != nil {
-		return fmt.Errorf("update status dokter: %w", err)
+		return tandaiKonflik("update status dokter", err)
 	}
 
-	// pgconn.PgError membawa SQLSTATE. 40001 = serialization_failure,
-	// satu-satunya error yang boleh memicu retry di sini. Error lain
-	// (koneksi putus, constraint dilanggar) harus diteruskan apa adanya.
 	if err := tx.Commit(); err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "40001" {
-			return fmt.Errorf("%w: %v", errKonflikSerialisasi, err)
-		}
-		return fmt.Errorf("commit transaction: %w", err)
+		return tandaiKonflik("commit transaction", err)
 	}
 	return nil
 }
 ```
 
-Kode di atas memakai dialek dan SQLSTATE PostgreSQL. InnoDB (MySQL/MariaDB) berperilaku berbeda: ia lebih sering menghasilkan lock wait timeout atau deadlock daripada serialization failure saat commit, sehingga strategi retry untuk MariaDB perlu memeriksa kode error MySQL, bukan SQLSTATE PostgreSQL.
+Kode di atas memakai dialek dan SQLSTATE PostgreSQL (lewat driver pgx untuk `database/sql`). InnoDB (MySQL/MariaDB) berperilaku berbeda: konflik yang sama muncul sebagai deadlock (error 1213) atau lock wait timeout (error 1205), bukan serialization failure. Strategi retry untuk MariaDB perlu memeriksa kode error itu lewat `*mysql.MySQLError`.
 
 ## In His Stack
 
@@ -183,7 +191,7 @@ Write skew adalah anomali yang paling relevan justru untuk aturan bisnis lintas 
 
 > [!success]- Kunci jawaban
 > **1.** Non-repeatable read terjadi ketika baris **yang sama** yang sudah dibaca sebelumnya, berubah **nilainya** ketika dibaca ulang dalam transaction yang sama (karena transaction lain meng-`UPDATE` dan `commit` baris itu di antaranya). Phantom read terjadi ketika kondisi pencarian yang sama (`WHERE status = 'menunggu'`, misalnya) menghasilkan **himpunan baris yang berbeda** ketika dijalankan ulang — bukan karena baris yang sudah ada berubah nilainya, tapi karena ada baris **baru** yang cocok kriteria itu (di-`INSERT` transaction lain) muncul di antara dua eksekusi. Keduanya soal "hasil berubah antar baca", tapi objek yang berubah beda: nilai baris yang sama vs keanggotaan himpunan hasil.
-> **4.** Pendekatan `SERIALIZABLE` + retry: setiap loket menjalankan transaction `SERIALIZABLE` yang menghitung nomor terakhir dan memeriksa batas 100, lalu insert nomor baru — kalau dua loket konflik (mencoba insert nomor yang tumpang tindih secara logis), database memaksa satu di antaranya gagal dan aplikasi mengulang. Ini sederhana ditulis tapi throughput-nya bisa turun tajam di jam sibuk dengan puluhan loket, karena tingkat konflik (dan karenanya tingkat retry) meningkat drastis seiring banyaknya transaction konkuren yang bersaing memperbarui "nomor terakhir" yang sama. Pendekatan locking eksplisit: setiap loket melakukan `SELECT nomor_terakhir FROM counter_antrean WHERE tanggal = ? FOR UPDATE` lebih dulu — baris counter itu sendiri terkunci selama transaction, memaksa loket lain **menunggu** (bukan gagal dan retry) sampai loket pertama selesai increment dan commit. Untuk kasus ini, locking eksplisit pada satu baris counter yang jelas biasanya lebih dapat diprediksi dan lebih murah dibanding `SERIALIZABLE` penuh (yang harus memeriksa dependensi across seluruh transaction), karena kontensinya terpusat pada satu titik yang jelas (baris counter) alih-alih bergantung pada deteksi konflik yang lebih general dan mahal.
+> **4.** Sebelum memilih pendekatan, pasang dulu `UNIQUE (tanggal, nomor)`. Constraint itu menjamin tidak ada nomor dobel apa pun isolation level-nya, dan menjadi pertahanan terakhir kalau logika aplikasi keliru. Yang tersisa adalah batas 100 dan urutan nomor. Pendekatan `SERIALIZABLE` + retry: setiap loket membaca nomor terakhir, memeriksa batas 100, lalu menyisipkan nomor baru. Kalau dua loket bertabrakan, database menggagalkan salah satunya dan aplikasi mengulang. Ini sederhana ditulis, tapi di jam sibuk dengan puluhan loket, hampir semua transaction bersaing atas data yang sama. Tingkat konflik (dan retry) naik tajam, dan throughput bisa jatuh. Pendekatan locking eksplisit: setiap loket menjalankan `SELECT nomor_terakhir FROM counter_antrean WHERE tanggal = ? FOR UPDATE` lebih dulu. Baris counter terkunci selama transaction, sehingga loket lain **menunggu** (bukan gagal lalu mengulang) sampai loket pertama selesai increment dan commit. Untuk kasus ini, lock pada satu baris counter biasanya lebih bisa diprediksi dan lebih murah. Kontensinya terpusat di satu titik yang jelas, dan transaction yang dikunci cukup singkat (baca, increment, insert, commit).
 
 ## Self-Check
 
@@ -204,6 +212,7 @@ Write skew adalah anomali yang paling relevan justru untuk aturan bisnis lintas 
 
 - Dokumentasi resmi PostgreSQL, bagian "Serializable Isolation Level" dan penjelasan Serializable Snapshot Isolation.
 - Dokumentasi resmi MySQL/InnoDB, bagian "Consistent Nonlocking Reads" dan "Locking Reads".
+- Hal Berenson, Phil Bernstein, Jim Gray, Jim Melton, Elizabeth O'Neil, Patrick O'Neil — *A Critique of ANSI SQL Isolation Levels* (SIGMOD 1995). Paper yang menunjukkan bahwa definisi level isolasi di standar SQL ambigu, dan yang memperkenalkan snapshot isolation serta anomali seperti write skew secara formal.
 
 ## Catatan Saya
 

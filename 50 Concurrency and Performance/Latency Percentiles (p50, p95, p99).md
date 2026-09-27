@@ -18,7 +18,7 @@ Rata-rata (mean) latency adalah metrik yang secara sistematis **menyembunyikan**
 
 ## The Problem
 
-Sebuah tim melaporkan "rata-rata latency endpoint kami hanya 80ms, sangat baik" ke manajemen, sementara laporan keluhan pengguna terus berdatangan soal sistem yang "kadang terasa sangat lambat". Kedua hal ini bisa sama-sama benar sekaligus: rata-rata 80ms bisa dihasilkan dari distribusi di mana 95% request memang cepat (50ms), tapi 5% sisanya butuh 1-2 detik. Jumlah itu cukup untuk terus mendorong rata-rata tetap rendah (karena mayoritas data memang cepat), tapi tetap berarti **ribuan pengguna** (kalau volume total tinggi) benar-benar mengalami latency yang buruk setiap harinya.
+Sebuah tim melaporkan "rata-rata latency endpoint kami hanya 80ms, sangat baik" ke manajemen, sementara laporan keluhan pengguna terus berdatangan soal sistem yang "kadang terasa sangat lambat". Kedua hal ini bisa sama-sama benar sekaligus: rata-rata 80ms bisa dihasilkan dari distribusi di mana 98% request memang cepat (50ms), tapi 2% sisanya butuh sekitar 1,5 detik ($0.98 \times 50 + 0.02 \times 1500 \approx 80$). Proporsi itu terlalu kecil untuk mendorong rata-rata naik jauh (karena mayoritas data memang cepat), tapi tetap berarti **ribuan pengguna** (kalau volume total tinggi) benar-benar mengalami latency yang buruk setiap harinya.
 
 Masalah kedua: sebuah sistem dengan SLA "p99 di bawah 500ms" tampak baik-baik saja dilihat dari dashboard rata-rata, tapi tim tidak menyadari bahwa p99 sudah melebihi 2 detik selama beberapa jam di setiap hari kerja (jam sibuk pagi). Ini karena dashboard yang ada hanya menampilkan rata-rata harian yang dihitung dari seluruh 24 jam, "meratakan" lonjakan p99 di jam sibuk dengan periode sepi di malam hari, dan menyembunyikan pola yang sangat relevan untuk pengalaman pengguna nyata di jam kerja.
 
@@ -46,7 +46,7 @@ Diagram ini menunjukkan cara paling sederhana memahami persentil: urutkan seluru
 
 **Menghitung persentil dari data yang benar-benar terkumpul** (bukan estimasi) butuh menyimpan **seluruh** titik data latency dan mengurutkannya — pendekatan yang mahal secara memori untuk sistem dengan volume sangat tinggi. Sistem monitoring modern (Prometheus, dibahas di domain `70 Infrastructure and Delivery`) biasanya memakai **histogram** atau **summary** — struktur data yang mengelompokkan latency ke dalam bucket/rentang tertentu, memberi **estimasi** persentil yang cukup akurat tanpa perlu menyimpan setiap titik data mentah individual. Estimasi ini punya trade-off presisi vs biaya penyimpanan — histogram dengan bucket yang terlalu kasar bisa memberi estimasi persentil yang kurang presisi, terutama untuk persentil ekstrem seperti p99.9.
 
-**Agregasi persentil lintas banyak instance adalah jebakan matematis yang sering tidak disadari**: rata-rata dari beberapa **p99 individual** (satu p99 per instance/pod) **bukan** p99 gabungan yang benar secara matematis — persentil tidak bisa dirata-ratakan begitu saja seperti rata-rata biasa. Menghitung p99 gabungan yang benar butuh menggabungkan histogram mentah dari seluruh instance terlebih dahulu, baru menghitung persentil dari histogram gabungan itu — kesalahan menghitung "rata-rata dari p99" adalah kesalahan statistik yang cukup umum ditemukan di dashboard yang dibangun tanpa pemahaman ini.
+**Agregasi persentil lintas banyak instance adalah jebakan matematis yang sering tidak disadari**: rata-rata dari beberapa **p99 individual** (satu p99 per instance/pod) **bukan** p99 gabungan yang benar secara matematis — persentil tidak bisa dirata-ratakan begitu saja seperti rata-rata biasa. Menghitung p99 gabungan yang benar butuh menggabungkan histogram mentah dari seluruh instance terlebih dahulu, baru menghitung persentil dari histogram gabungan itu. Inilah perbedaan praktis terpenting antara dua tipe metrik Prometheus: **histogram** bisa digabung lintas instance (`histogram_quantile(0.99, sum by (le) (rate(...[5m])))`), sedangkan persentil yang sudah dihitung di dalam **summary** tidak bisa digabung sama sekali — kesalahan menghitung "rata-rata dari p99" adalah kesalahan statistik yang cukup umum ditemukan di dashboard yang dibangun tanpa pemahaman ini.
 
 ## In Go
 
@@ -78,8 +78,10 @@ func contohPenggunaan() {
 	p50 := HitungPersentilSederhana(latensiRequest, 50)
 	p99 := HitungPersentilSederhana(latensiRequest, 99)
 
-	// p50 akan mendekati 49 (median, TIDAK terpengaruh dua nilai ekstrem)
-	// p99 akan sangat dipengaruhi nilai 3200/4800 (ekor panjang)
+	// p50 = 49 (median, tidak terpengaruh dua nilai ekstrem)
+	// p99 = 3200 (ekor panjang). Dengan hanya 10 sampel, "p99" praktis
+	// sama dengan nilai tertinggi kedua; persentil ekstrem baru bermakna
+	// kalau jumlah sampelnya jauh lebih besar (ribuan ke atas).
 	_ = p50
 	_ = p99
 }

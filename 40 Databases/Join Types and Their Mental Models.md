@@ -100,7 +100,7 @@ func AmbilLaporanSemuaInstansi(ctx context.Context, db *sql.DB) ([]LaporanInstan
 		SELECT i.nama, COUNT(p.id) AS jumlah_permohonan
 		FROM instansi i
 		LEFT JOIN permohonan p ON p.instansi_id = i.id
-		GROUP BY i.nama
+		GROUP BY i.id, i.nama -- id ikut dikelompokkan: dua instansi bernama sama tetap terpisah
 		ORDER BY i.nama
 	`)
 	if err != nil {

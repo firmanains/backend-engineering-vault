@@ -83,6 +83,13 @@ func prosesBatchBesar(ctx context.Context, items []Item) error {
 
 Tanpa `select { case <-ctx.Done(): ... }` eksplisit ini, loop akan terus berjalan sampai selesai berapa pun context-nya sudah dibatalkan — context yang diteruskan dengan benar saja **tidak cukup** kalau kode di dalamnya tidak secara aktif memeriksanya.
 
+Ada satu nuansa penting untuk database. Saat context dibatalkan, `database/sql` di sisi aplikasi langsung berhenti menunggu. Tapi apakah **query di server database** ikut berhenti bergantung pada driver-nya. Driver PostgreSQL seperti `pgx` mengirim *cancel request* sehingga PostgreSQL benar-benar menghentikan query. Driver `go-sql-driver/mysql` menutup koneksinya, dan MySQL/MariaDB bisa tetap menjalankan query berat itu sampai ia mencoba mengirim hasil. Untuk query yang benar-benar mahal di MariaDB, pasang juga batas di sisi server (misalnya `max_statement_time`), jangan hanya mengandalkan context.
+
+> [!question] Perlu diverifikasi
+> Klaim: pembatalan context lewat `go-sql-driver/mysql` menutup koneksi tanpa menghentikan query yang sedang berjalan di server MySQL/MariaDB.
+> Kenapa ragu: perilaku driver dan server bisa berubah antar versi; dari ingatan, bukan dari pengujian.
+> Cara verifikasi: jalankan query lambat (`SELECT SLEEP(30)` atau query berat) dengan context yang dibatalkan setelah 1 detik, lalu periksa `SHOW PROCESSLIST` di MariaDB apakah query itu masih berjalan.
+
 ## In His Stack
 
 **PHP (Yii1/Yii2)** dengan model eksekusi klasik tidak punya mekanisme setara context propagation yang idiomatic — setiap request PHP berjalan sampai selesai di dalam satu proses/eksekusi tunggal, tanpa konsep "membatalkan pekerjaan di tengah jalan karena client sudah pergi" yang mengalir otomatis lewat kode biasa (PHP punya `connection_aborted()`/`ignore_user_abort()` tapi jarang dipakai dan jauh lebih kasar). Ini kenapa disiplin meneruskan context di Go adalah kebiasaan yang benar-benar **baru** untuk engineer yang datang dari PHP — bukan sesuatu yang otomatis terbawa dari kebiasaan lama, harus dibangun sengaja.

@@ -69,6 +69,18 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
+// newWriter WAJIB menyetel Balancer berbasis key. Default kafka.Writer
+// adalah RoundRobin, yang MENGABAIKAN key sama sekali.
+func newWriter(brokers []string) *kafka.Writer {
+	return &kafka.Writer{
+		Addr:  kafka.TCP(brokers...),
+		Topic: "status-permohonan",
+		// Murmur2Balancer memakai hash yang sama dengan client Java, jadi
+		// producer Go dan Java menaruh key yang sama di partition yang sama.
+		Balancer: &kafka.Murmur2Balancer{},
+	}
+}
+
 func kirimEventPermohonan(ctx context.Context, writer *kafka.Writer, permohonanID string, event string) error {
 	pesan := kafka.Message{
 		// Key yang sama (permohonanID) akan selalu di-hash ke
@@ -84,7 +96,9 @@ func kirimEventPermohonan(ctx context.Context, writer *kafka.Writer, permohonanI
 }
 ```
 
-Tanpa `Key` yang eksplisit di atas, `kafka-go` (dan client Kafka pada umumnya) akan mendistribusikan pesan secara round-robin atau berbasis hash acak ke seluruh partition — tepat untuk throughput, salah untuk kasus yang butuh urutan per entitas seperti event permohonan di atas.
+Jebakan khas `kafka-go` ada di `newWriter`: `kafka.Writer` tanpa `Balancer` memakai `RoundRobin`, yang menyebar pesan ke semua partition **tanpa melihat key**. Menyetel `Key` saja tidak cukup; balancer berbasis hash harus dipilih eksplisit. Pilihan balancer juga menentukan kompatibilitas lintas bahasa: `kafka.Hash` memakai FNV-1a (sama dengan Sarama), `CRC32Balancer` cocok dengan librdkafka, dan `Murmur2Balancer` cocok dengan client Java. Kalau satu topic ditulis oleh producer dari beberapa bahasa, semuanya harus memakai algoritma hash yang sama, atau key yang sama bisa berakhir di partition berbeda.
+
+Tanpa `Key` sama sekali, pesan disebar ke seluruh partition — tepat untuk throughput, salah untuk kasus yang butuh urutan per entitas seperti event permohonan di atas.
 
 ## In His Stack
 
@@ -113,7 +127,11 @@ Menambah partition adalah cara utama menaikkan throughput sebuah topic, tapi tra
 4. **(Open-ended)** Sebuah topic `status-permohonan` awalnya dibuat dengan satu partition dan tanpa key eksplisit (semua pesan otomatis masuk partition tunggal itu, urut secara alami). Sistem tumbuh dan butuh empat partition untuk menangani throughput. Rancang langkah migrasi yang aman: bagaimana menambah partition dan memastikan urutan event per permohonan tetap terjaga setelah migrasi, termasuk penanganan pesan lama yang sudah ada di partition tunggal sebelumnya.
 
 > [!success]- Kunci jawaban
-> Untuk soal 4: langkah pertama adalah menetapkan `permohonan_id` sebagai key sebelum menambah partition apa pun — dengan satu partition, key belum berpengaruh (semua pesan tetap masuk partition yang sama), tapi ini memastikan begitu partition ditambah, distribusi baru langsung konsisten per entitas. Setelah key ditetapkan di kode producer dan di-deploy, baru tambah jumlah partition topic menjadi empat. Pesan lama yang sudah ada di partition tunggal tidak perlu (dan tidak bisa) dipindahkan — mereka tetap valid di posisi asalnya, dan consumer yang membaca dari awal akan tetap membaca partition lama itu secara berurutan sebelum sampai ke pesan-pesan baru yang sudah tersebar ke empat partition.
+> Untuk soal 4: langkah pertama adalah menetapkan `permohonan_id` sebagai key (dengan balancer berbasis hash) sebelum menambah partition apa pun — dengan satu partition, key belum berpengaruh, tapi ini memastikan begitu partition ditambah, distribusi baru langsung konsisten per entitas.
+>
+> Bagian yang paling sering terlewat adalah **masa transisi**. Setelah partition ditambah, event lama permohonan X masih ada di partition 0, sementara event barunya bisa jatuh ke partition 3. Kedua partition itu dibaca consumer berbeda secara paralel, jadi tidak ada jaminan event lama selesai diproses sebelum event baru. Kalau consumer partition 0 masih punya backlog, event "disetujui" di partition 3 bisa diproses lebih dulu daripada event "diverifikasi" di partition 0 — persis bug di bagian The Problem.
+>
+> Urutan migrasi yang aman karena itu: (1) deploy producer dengan key; (2) hentikan sementara producer, atau tahan event di outbox; (3) tunggu consumer lag partition 0 mencapai nol; (4) tambah partition; (5) nyalakan kembali producer. Kalau jeda produksi tidak bisa diterima, alternatifnya adalah membuat topic baru dengan empat partition dan memindahkan consumer setelah topic lama habis dibaca. Consumer juga sebaiknya tetap defensif, misalnya menolak transisi status yang mundur berdasarkan versi atau timestamp event.
 
 ## Self-Check
 

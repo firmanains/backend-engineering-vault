@@ -84,10 +84,14 @@ func handleLongPolling(w http.ResponseWriter, r *http.Request) {
 		// status 200, bukan error, supaya client tahu ini kondisi
 		// normal dan langsung mengirim request long polling baru.
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"data": nil})
+		if err := json.NewEncoder(w).Encode(map[string]any{"data": nil}); err != nil {
+			http.Error(w, "gagal mengirim response", http.StatusInternalServerError)
+		}
 	}
 }
 ```
+
+Satu hal yang harus diselaraskan: `WriteTimeout` milik `http.Server` dihitung sejak header request selesai dibaca (lihat [[Timeouts in HTTP Servers]]), jadi ia wajib lebih panjang dari `batasWaktuTunggu`. Server dengan `WriteTimeout` 15 detik akan memutus setiap long poll 30 detik sebelum sempat membalas. Hal yang sama berlaku untuk timeout proxy di depannya.
 
 Pola `select` dengan `ctx.Done()` ini adalah alasan long polling relatif murah diimplementasikan di Go dibanding di model server yang satu thread per request tanpa mekanisme non-blocking — `context.WithTimeout` menangani batas waktu tanpa perlu goroutine tambahan untuk mengelola timer secara manual.
 

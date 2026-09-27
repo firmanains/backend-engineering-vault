@@ -18,7 +18,7 @@ Go tidak punya inheritance (pewarisan class) seperti PHP atau Java — sebagai g
 
 ## The Problem
 
-Seorang developer yang terbiasa dengan inheritance PHP/Java mencoba membuat `PetugasSupervisor` yang "mewarisi" seluruh method `Petugas` lalu menambah kemampuan baru, dengan asumsi Go punya mekanisme `extends` yang setara. Go tidak punya `class` atau `extends` sama sekali — mencoba memaksakan mental model inheritance ke Go biasanya berujung pada kebingungan soal bagaimana "override" method bekerja, atau kenapa sebuah `PetugasSupervisor` yang menyematkan `Petugas` tidak otomatis bisa dipakai di mana pun `Petugas` diharapkan sebagai parameter interface (polymorphism berbasis tipe, bukan berbasis hierarki class, adalah cara Go mencapai fleksibilitas semacam ini, lihat [[Interfaces and Implicit Satisfaction]]).
+Seorang developer yang terbiasa dengan inheritance PHP/Java mencoba membuat `PetugasSupervisor` yang "mewarisi" seluruh method `Petugas` lalu menambah kemampuan baru, dengan asumsi Go punya mekanisme `extends` yang setara. Go tidak punya `class` atau `extends` sama sekali — mencoba memaksakan mental model inheritance ke Go biasanya berujung pada kebingungan soal bagaimana "override" method bekerja, atau kenapa sebuah `PetugasSupervisor` yang menyematkan `Petugas` tidak bisa dioper ke function yang parameternya bertipe konkret `Petugas`. Yang bisa ia lakukan adalah memenuhi **interface** yang dipenuhi `Petugas`, karena method yang dipromosikan ikut masuk ke method set-nya. Polymorphism berbasis interface, bukan hierarki class, adalah cara Go mencapai fleksibilitas semacam ini (lihat [[Interfaces and Implicit Satisfaction]]).
 
 Masalah kedua yang lebih halus: embedding struct ke dalam struct lain untuk JSON marshalling (lihat [[../20 Go Language/Struct Tags and JSON Marshalling|Struct Tags and JSON Marshalling]]) punya efek samping yang mengejutkan pendatang baru — field dari struct yang disematkan **ikut muncul** di level teratas JSON output (bukan sebagai object bersarang), sebuah perilaku "flattening" otomatis yang bisa jadi tepat sekali atau justru merusak struktur API yang dimaksud, tergantung apakah developer menyadarinya sejak awal.
 
@@ -74,13 +74,13 @@ flowchart TD
     A -.->|"method Sapa()\nDIPROMOSIKAN, bisa dipanggil\nlangsung dari PetugasSupervisor"| B
 ```
 
-Diagram ini menunjukkan bahwa `PetugasSupervisor` tidak "menjadi" `Petugas` dalam artian hierarki tipe (`PetugasSupervisor` tidak otomatis memenuhi interface apa pun yang diminta `Petugas` secara implisit hanya karena embedding) — ia hanya mendapat **promosi** akses ke method dan field `Petugas`, sebuah relasi komposisi ("has-a" via embedding yang berperilaku seperti "is-a" untuk kenyamanan akses), bukan pewarisan tipe sesungguhnya.
+Diagram ini menunjukkan bahwa `PetugasSupervisor` tidak "menjadi" `Petugas` dalam artian hierarki tipe: nilai `PetugasSupervisor` tidak bisa dipakai di tempat yang meminta tipe konkret `Petugas`. Tapi method yang dipromosikan **masuk ke method set** `PetugasSupervisor`, jadi ia otomatis memenuhi setiap interface yang dipenuhi `Petugas` (misalnya interface `Penyapa { Sapa() string }`). Relasinya adalah komposisi ("has-a" via embedding yang berperilaku seperti "is-a" untuk kenyamanan akses dan untuk pemenuhan interface), bukan pewarisan tipe sesungguhnya.
 
 **Aturan promosi saat ada konflik nama**: kalau `PetugasSupervisor` mendefinisikan method dengan nama yang **sama** dengan method yang dipromosikan dari `Petugas` (misalnya `PetugasSupervisor` juga punya method `Sapa()` sendiri), method milik `PetugasSupervisor` **menang** — inilah satu-satunya bentuk "override" yang ada di Go, dan sifatnya statis (ditentukan struktur tipe, bukan virtual dispatch).
 
 ## Under The Hood
 
-Embedding juga berlaku untuk **interface**, tidak hanya struct — menyematkan interface di dalam struct lain berarti struct itu harus menyediakan implementasi interface tersebut (biasanya lewat field bertipe interface yang diisi implementasi konkret), sebuah pola yang sangat umum dipakai untuk "decorator" atau "wrapper" yang hanya perlu mengubah sebagian kecil perilaku sambil mendelegasikan sisanya. Menyematkan **interface kosong** (`interface{}`/`any`) ke dalam struct adalah pola khusus yang kadang dipakai untuk membuat implementasi "parsial" yang panic kalau method yang belum diimplementasikan benar-benar dipanggil — pola yang harus dipakai hati-hati karena menyembunyikan kegagalan implementasi interface sampai runtime.
+Embedding juga berlaku untuk **interface**, tidak hanya struct — menyematkan interface di dalam struct lain berarti struct itu harus menyediakan implementasi interface tersebut (biasanya lewat field bertipe interface yang diisi implementasi konkret), sebuah pola yang sangat umum dipakai untuk "decorator" atau "wrapper" yang hanya perlu mengubah sebagian kecil perilaku sambil mendelegasikan sisanya. Ada satu pola khusus yang sering dipakai di test: menyematkan sebuah interface lalu **membiarkannya bernilai nil**, dan hanya menulis ulang method yang dibutuhkan (`type fakeRepo struct{ Repository }`). Struct itu lolos kompilasi sebagai `Repository` meski hanya satu method yang benar-benar diimplementasikan; method lain panic (nil pointer dereference) kalau sampai dipanggil. Pola ini harus dipakai hati-hati karena menyembunyikan kegagalan implementasi interface sampai runtime.
 
 Untuk JSON marshalling, `encoding/json` (lewat reflection, lihat [[Reflection and Its Costs]]) memperlakukan field dari struct yang disematkan **tanpa tag json eksplisit** sebagai "flattened" — fieldnya muncul di level yang sama dengan field struct luar di output JSON, bukan sebagai object bersarang. Perilaku ini bisa dikontrol dengan memberi field eksplisit (bukan embedding) kalau struktur bersarang yang diinginkan, atau menerima flattening kalau memang itu yang dimaksud.
 
@@ -89,7 +89,10 @@ Untuk JSON marshalling, `encoding/json` (lewat reflection, lihat [[Reflection an
 ```go
 package handler
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 type Alamat struct {
 	Kota     string `json:"kota"`
@@ -113,18 +116,23 @@ type PermohonanBersarang struct {
 	Alamat Alamat `json:"alamat"`
 }
 
-func contohOutput() {
+func contohOutput() (flat, bersarang []byte, err error) {
 	pf := PermohonanFlatten{Nomor: "P-001", Alamat: Alamat{Kota: "Jakarta", Provinsi: "DKI Jakarta"}}
 	pb := PermohonanBersarang{Nomor: "P-001", Alamat: Alamat{Kota: "Jakarta", Provinsi: "DKI Jakarta"}}
 
-	hasilFlatten, _ := json.Marshal(pf)
+	flat, err = json.Marshal(pf)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal flatten: %w", err)
+	}
 	// {"nomor":"P-001","kota":"Jakarta","provinsi":"DKI Jakarta"}
 
-	hasilBersarang, _ := json.Marshal(pb)
+	bersarang, err = json.Marshal(pb)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal bersarang: %w", err)
+	}
 	// {"nomor":"P-001","alamat":{"kota":"Jakarta","provinsi":"DKI Jakarta"}}
 
-	_ = hasilFlatten
-	_ = hasilBersarang
+	return flat, bersarang, nil
 }
 ```
 

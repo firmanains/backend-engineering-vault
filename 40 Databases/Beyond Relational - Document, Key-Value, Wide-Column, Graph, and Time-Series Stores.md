@@ -14,7 +14,7 @@ created: 2026-07-29
 
 ## TL;DR
 
-Database relasional (MariaDB, PostgreSQL) memaksa data ke bentuk tabel dengan skema tetap — pilihan yang tepat untuk data yang secara alami punya struktur relasional dan butuh konsistensi ketat. Tapi tidak semua data punya bentuk itu secara natural, dan memaksakan bentuk relasional pada data yang tidak cocok adalah sumber friksi nyata. Lima kategori model data "beyond relational" masing-masing mengoptimalkan pola akses yang berbeda: **document store** untuk data semi-terstruktur yang bentuknya bervariasi, **key-value store** untuk pencarian tercepat berdasarkan satu kunci, **wide-column store** untuk data dengan jutaan kolom yang jarang semuanya terisi, **graph database** untuk data yang nilainya justru ada di **hubungan** antar entitas, dan **time-series database** untuk data yang selalu bertambah seiring waktu dan jarang diubah. **NoSQL tidak lebih cepat dari SQL** — ia membuat trade-off yang berbeda, biasanya melonggarkan konsistensi atau skema demi fleksibilitas atau skala tertentu.
+Database relasional (MariaDB, PostgreSQL) memaksa data ke bentuk tabel dengan skema tetap — pilihan yang tepat untuk data yang secara alami punya struktur relasional dan butuh konsistensi ketat. Tapi tidak semua data punya bentuk itu secara natural, dan memaksakan bentuk relasional pada data yang tidak cocok adalah sumber friksi nyata. Lima kategori model data "beyond relational" masing-masing mengoptimalkan pola akses yang berbeda: **document store** untuk data semi-terstruktur yang bentuknya bervariasi, **key-value store** untuk pencarian tercepat berdasarkan satu kunci, **wide-column store** untuk volume tulis sangat besar yang selalu dibaca lewat kunci partisi yang sudah diketahui, **graph database** untuk data yang nilainya justru ada di **hubungan** antar entitas, dan **time-series database** untuk data yang selalu bertambah seiring waktu dan jarang diubah. **NoSQL tidak lebih cepat dari SQL** — ia membuat trade-off yang berbeda, biasanya melonggarkan konsistensi atau skema demi fleksibilitas atau skala tertentu.
 
 ## The Problem
 
@@ -28,7 +28,7 @@ Bayangkan kelima model data ini seperti lima jenis wadah penyimpanan berbeda di 
 
 - **Document store** seperti **kotak penyimpanan fleksibel** yang bisa menampung barang berbagai bentuk dan ukuran tanpa perlu kompartemen tetap — cocok untuk barang yang bentuknya berubah-ubah tergantung isinya.
 - **Key-value store** seperti **loker bernomor** — kamu hanya butuh tahu nomor lokernya untuk langsung mengambil isinya secepat mungkin, tanpa peduli struktur di dalamnya.
-- **Wide-column store** seperti **rak dengan ribuan slot label**, di mana setiap baris punya kombinasi slot terisi yang sangat berbeda-beda (baris A mengisi slot 1, 5, 900; baris B mengisi slot 2, 3, 4) — memaksakan ini ke tabel dengan kolom tetap berarti kebanyakan sel kosong terbuang percuma.
+- **Wide-column store** seperti **lemari arsip per nama pemilik**, di mana setiap laci (partisi) berisi map milik satu pemilik yang sudah tersusun menurut tanggal. Mengambil "semua map milik Budi bulan ini" sangat cepat; mencari "semua map yang bertanda merah" di seluruh lemari hampir mustahil tanpa lemari kedua yang disusun dengan cara lain.
 - **Graph database** seperti **peta jaringan pertemanan** yang secara eksplisit menggambar garis hubungan antar orang — pertanyaan seperti "teman dari teman dari teman" dijawab dengan mengikuti garis itu, bukan mencari lewat daftar nama satu per satu.
 - **Time-series database** seperti **buku catatan harian yang halamannya selalu ditambah di akhir**, tidak pernah disisipkan di tengah atau diubah — cocok untuk data yang selalu berjalan maju seiring waktu.
 
@@ -42,7 +42,7 @@ flowchart TD
     B -->|Ya| Doc["Document Store\n(MongoDB)"]
     A --> C{"Hanya butuh get/set\nberdasarkan satu key?"}
     C -->|Ya| KV["Key-Value Store\n(Redis)"]
-    A --> D{"Jutaan kolom,\nsebagian besar kosong per baris?"}
+    A --> D{"Tulis sangat besar, selalu\ndibaca per kunci partisi?"}
     D -->|Ya| WC["Wide-Column Store\n(Cassandra)"]
     A --> E{"Nilai utama ada di\nHUBUNGAN antar entitas?"}
     E -->|Ya| Graph["Graph Database\n(Neo4j)"]
@@ -56,7 +56,7 @@ Diagram ini adalah kerangka keputusan, bukan aturan kaku — banyak kasus nyata 
 
 - **Document store** (MongoDB) — menyimpan data sebagai dokumen JSON/BSON dengan skema fleksibel per dokumen; unggul untuk data dengan struktur bervariasi/nested, tapi query lintas dokumen yang kompleks (mirip `JOIN` relasional) kurang natural dan seringkali harus didenormalisasi.
 - **Key-value store** (Redis) — model paling sederhana: get/set berdasarkan key; sangat cepat karena strukturnya minimal, tapi tidak mendukung query berdasarkan isi value tanpa index tambahan.
-- **Wide-column store** (Cassandra) — setiap baris bisa punya kombinasi kolom yang sama sekali berbeda dari baris lain, dioptimalkan untuk skala tulis sangat tinggi lintas banyak node, dengan model konsistensi yang biasanya lebih longgar dibanding relasional.
+- **Wide-column store** (Cassandra) — data dikelompokkan per *partition key* (yang menentukan node penyimpannya) dan diurutkan di dalam partisi berdasarkan *clustering key*. Query efisien hanya kalau menyebut partition key-nya, sehingga tabel dirancang **per pola query**, bukan per entitas, dan data yang sama sering disimpan di beberapa tabel. Dioptimalkan untuk skala tulis sangat tinggi lintas banyak node (storage-nya berbasis [[LSM-Trees vs B-Trees|LSM-Tree]]), dengan konsistensi yang bisa diatur per query dan biasanya lebih longgar dibanding relasional.
 - **Graph database** (Neo4j) — node dan edge (hubungan) adalah warga negara kelas satu; traversal hubungan (mengikuti rantai koneksi) adalah operasi native yang cepat, sesuatu yang butuh `JOIN` berlapis mahal di relasional.
 - **Time-series database** — dioptimalkan untuk tulis berurutan berdasarkan waktu dan query berdasarkan rentang waktu, sering memakai kompresi agresif karena data time-series punya pola yang sangat predictable (nilai berdekatan waktu seringkali mirip).
 
@@ -73,48 +73,40 @@ package formulir
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // FormulirDinamis menunjukkan kecocokan document store untuk kasus
-// "The Problem" pertama — skema field yang berbeda per jenis layanan,
-// tanpa migrasi skema setiap kali field baru ditambahkan.
+// pertama di The Problem: field berbeda per jenis layanan, tanpa migrasi
+// skema setiap kali field baru ditambahkan.
 type FormulirDinamis struct {
-	ID           string                 `bson:"_id"`
-	JenisLayanan string                 `bson:"jenis_layanan"`
-	Field        map[string]interface{} `bson:"field"` // struktur BEBAS, ditentukan aplikasi
+	// omitempty penting: tanpa itu, ID kosong ikut tersimpan sebagai
+	// _id: "" dan insert kedua gagal karena duplicate key. Dengan
+	// omitempty, MongoDB membuatkan ObjectID otomatis.
+	ID           string         `bson:"_id,omitempty"`
+	JenisLayanan string         `bson:"jenis_layanan"`
+	Field        map[string]any `bson:"field"` // struktur bebas, divalidasi aplikasi
 }
 
-func SimpanFormulir(ctx context.Context, koleksi *mongo.Collection, formulir FormulirDinamis) error {
-	_, err := koleksi.InsertOne(ctx, formulir)
-	if err != nil {
+// fieldWajib adalah "skema di aplikasi": database tidak memeriksa apa pun,
+// jadi aplikasi yang harus memastikan field penting ada.
+var fieldWajib = map[string][]string{
+	"izin_usaha":    {"npwp", "alamat_usaha"},
+	"izin_bangunan": {"luas_tanah_m2"},
+}
+
+func SimpanFormulir(ctx context.Context, koleksi *mongo.Collection, f FormulirDinamis) error {
+	for _, nama := range fieldWajib[f.JenisLayanan] {
+		if _, ada := f.Field[nama]; !ada {
+			return fmt.Errorf("formulir %s: field %q wajib diisi", f.JenisLayanan, nama)
+		}
+	}
+	if _, err := koleksi.InsertOne(ctx, f); err != nil {
 		return fmt.Errorf("simpan formulir dinamis: %w", err)
 	}
 	return nil
-}
-
-// contohField menunjukkan dua jenis layanan dengan field yang SAMA SEKALI
-// berbeda, disimpan dalam koleksi yang sama tanpa perlu migrasi skema.
-func contohField() {
-	izinUsaha := FormulirDinamis{
-		JenisLayanan: "izin_usaha",
-		Field: map[string]interface{}{
-			"npwp":          "01.234.567.8-901.000",
-			"alamat_usaha":  "Jl. Merdeka No. 1",
-		},
-	}
-	izinBangunan := FormulirDinamis{
-		JenisLayanan: "izin_bangunan",
-		Field: map[string]interface{}{
-			"luas_tanah_m2": 250,
-			"imb_sebelumnya": "IMB-2019-00123",
-		},
-	}
-	_ = izinUsaha
-	_ = izinBangunan
 }
 ```
 
@@ -141,7 +133,9 @@ func SimpanSesi(ctx context.Context, rdb *redis.Client, sessionID string, userID
 
 ## In His Stack
 
-Redis (key-value/struktur data in-memory) sudah menjadi bagian ekosistem kerja untuk caching dan session — pemahaman "kenapa key-value store, bukan tabel relasional" untuk kasus ini menjelaskan kenapa Redis terasa jauh lebih cepat untuk kasus get/set sederhana dibanding query setara di MariaDB, karena strukturnya memang diminimalkan khusus untuk pola akses itu. Elasticsearch, meski sering dikategorikan terpisah (dibahas lebih dalam sebagai "search" di sisa domain ini), berbagi filosofi dengan document store dalam hal skema yang fleksibel per dokumen. Untuk 13 aplikasi pemerintah yang kemungkinan besar tetap mayoritas menggunakan model relasional (data warga, permohonan, status, semuanya secara alami relasional dan butuh konsistensi ketat), model "beyond relational" ini paling relevan dipertimbangkan untuk kebutuhan **spesifik** yang tidak natural di relasional (formulir dinamis, cache, audit trail bervolume sangat tinggi), bukan sebagai pengganti database utama.
+Redis (key-value/struktur data in-memory) sudah menjadi bagian ekosistem kerja untuk caching dan session — pemahaman "kenapa key-value store, bukan tabel relasional" untuk kasus ini menjelaskan kenapa Redis terasa jauh lebih cepat untuk kasus get/set sederhana dibanding query setara di MariaDB, karena strukturnya memang diminimalkan khusus untuk pola akses itu. Elasticsearch, meski sering dikategorikan terpisah (dibahas lebih dalam sebagai "search" di sisa domain ini), berbagi filosofi dengan document store dalam hal skema yang fleksibel per dokumen. Untuk kasus formulir dinamis secara khusus, ada jalan tengah yang sering lebih tepat daripada menambah database baru: kolom JSON di database relasional yang sudah ada. PostgreSQL punya `JSONB` yang bisa di-index dengan GIN (lihat [[../92 Tools/PostgreSQL - Features Worth Switching For|PostgreSQL - Features Worth Switching For]]); MariaDB punya tipe `JSON` (disimpan sebagai teks yang divalidasi) dengan fungsi `JSON_VALUE` dan *generated column* yang bisa di-index untuk field yang sering dicari. Field inti (`id`, `jenis_layanan`, `status`, `pemohon_id`) tetap berupa kolom biasa dengan constraint, dan hanya field yang bervariasi yang masuk ke kolom JSON. Tim tetap mendapat transaction, `JOIN`, dan backup yang sama, tanpa mengoperasikan MongoDB.
+
+Untuk 13 aplikasi pemerintah yang kemungkinan besar tetap mayoritas menggunakan model relasional (data warga, permohonan, status, semuanya secara alami relasional dan butuh konsistensi ketat), model "beyond relational" ini paling relevan dipertimbangkan untuk kebutuhan **spesifik** yang tidak natural di relasional (formulir dinamis, cache, audit trail bervolume sangat tinggi), bukan sebagai pengganti database utama.
 
 ## Trade-offs and When Not To Use It
 
@@ -167,7 +161,7 @@ Setiap model "beyond relational" mengorbankan sesuatu yang diberikan gratis oleh
 
 > [!success]- Kunci jawaban
 > **1.** "NoSQL lebih cepat" keliru karena setiap model NoSQL mencapai kecepatannya justru dengan **mengorbankan** sesuatu yang diberikan database relasional secara default — key-value store cepat karena strukturnya sangat minimal (tidak ada query berdasarkan isi value), wide-column store cepat untuk tulis skala besar karena melonggarkan konsistensi lintas baris. Kecepatan itu spesifik untuk pola akses yang cocok dengan trade-off itu; untuk pola akses yang butuh fitur yang dikorbankan (misalnya query kompleks lintas entitas), model yang sama bisa jauh lebih lambat atau bahkan tidak mendukungnya sama sekali dibanding database relasional.
-> **4.** Data ini punya karakteristik time-series yang jelas (append-only, diurutkan waktu, agregasi berdasarkan rentang waktu). Time-series database, atau pendekatan yang mengikuti prinsipnya (misalnya tabel di-partition berdasarkan waktu, lihat [[Partitioning]], dikombinasikan dengan pola LSM-Tree kalau volumenya sangat tinggi), adalah pilihan yang tepat berdasarkan pola akses yang disebutkan. Alternatif yang tetap masuk akal untuk skala sedang: tabel relasional biasa yang di-partition berdasarkan tanggal (menggabungkan kesederhanaan operasional relasional dengan manfaat pruning berbasis waktu). Pilihan ini lebih mudah dioperasikan untuk tim yang sudah familiar dengan MariaDB/PostgreSQL, dan baru beralih ke time-series database khusus (seperti yang dibahas di domain tools, tier working/orientation) kalau volume dan kebutuhan query time-series-nya sudah jauh melampaui yang bisa ditangani baik oleh relasional yang di-partition dengan benar.
+> **4.** Sekilas data ini terlihat seperti time-series (append-only, berurutan waktu), tapi pola aksesnya menunjuk ke arah lain. Query paling sering, "riwayat status permohonan X", adalah pencarian per entitas: index `(permohonan_id, waktu)` di tabel relasional menjawabnya dengan satu range scan kecil. Time-series database (seperti InfluxDB atau Prometheus) dirancang untuk metrik numerik yang diagregasi lintas waktu, dan umumnya lemah terhadap label ber-*cardinality* tinggi seperti `permohonan_id` yang jumlahnya jutaan. Query kedua, "rata-rata lama status Y bertahan per bulan", bisa dijawab di relasional dengan window function `LEAD(waktu) OVER (PARTITION BY permohonan_id ORDER BY waktu)` (lihat [[Window Functions]]), atau dihitung terjadwal ke tabel ringkasan. Pilihan yang tepat untuk kebanyakan skala: tabel relasional append-only, di-partition per bulan untuk retensi (lihat [[Partitioning]]). Kalau volume analitiknya tumbuh jauh, salin data itu ke sistem columnar (ClickHouse), bukan ke time-series database.
 
 ## Self-Check
 

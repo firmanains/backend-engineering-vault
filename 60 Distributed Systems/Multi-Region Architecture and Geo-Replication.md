@@ -54,7 +54,10 @@ Pendekatan yang sering dipakai untuk menyeimbangkan trade-off ini: **partisi geo
 ```go
 package multiregion
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // DataAffinity menunjukkan strategi PARTISI GEOGRAFIS — data
 // diarahkan ke region yang secara alami relevan, MENGURANGI
@@ -82,9 +85,12 @@ func RegionForCase(caseProvince string) DataAffinity {
 // mayoritas operasi yang memang berkaitan dengan data lokal region itu.
 func WriteWithAffinity(ctx context.Context, affinity DataAffinity, data string) error {
 	// Tulis ke region yang sesuai affinity, replikasi ke region lain
-	// terjadi ASINKRON di belakang layar untuk kebutuhan baca lintas
+	// terjadi asinkron di belakang layar untuk kebutuhan baca lintas
 	// region (misalnya laporan nasional).
-	return writeToRegion(ctx, affinity.PrimaryRegion, data)
+	if err := writeToRegion(ctx, affinity.PrimaryRegion, data); err != nil {
+		return fmt.Errorf("multiregion: tulis ke %s: %w", affinity.PrimaryRegion, err)
+	}
+	return nil
 }
 
 func writeToRegion(ctx context.Context, region, data string) error { return nil }

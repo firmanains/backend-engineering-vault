@@ -62,6 +62,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 )
 
@@ -78,6 +79,10 @@ type DataPartnerBersih struct {
 	Status string
 }
 
+// Batas atas body yang mau dibaca: response partner tidak dipercaya,
+// termasuk ukurannya.
+const maxBodyPartner = 1 << 20 // 1 MB
+
 func (k *KlienPartnerDefensif) AmbilData(ctx context.Context, id string) (DataPartnerBersih, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, k.baseURL+"/data/"+id, nil)
 	if err != nil {
@@ -90,15 +95,19 @@ func (k *KlienPartnerDefensif) AmbilData(ctx context.Context, id string) (DataPa
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyPartner))
 	if err != nil {
 		return DataPartnerBersih{}, fmt.Errorf("baca body response: %w", err)
 	}
 
 	// JEBAKAN PARTNER #1: partner diketahui mengembalikan 200 OK bahkan
 	// untuk error — periksa CONTENT-TYPE dan struktur, bukan hanya status code.
-	if resp.Header.Get("Content-Type") != "application/json" {
-		return DataPartnerBersih{}, fmt.Errorf("partner mengembalikan non-JSON (kemungkinan halaman error HTML), status=%d", resp.StatusCode)
+	// ParseMediaType dipakai karena header sah bisa berbentuk
+	// "application/json; charset=utf-8", yang gagal kalau dibandingkan persis.
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return DataPartnerBersih{}, fmt.Errorf("partner mengembalikan non-JSON (kemungkinan halaman error HTML), status=%d, content-type=%q",
+			resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
 
 	var mentah struct {
@@ -107,7 +116,11 @@ func (k *KlienPartnerDefensif) AmbilData(ctx context.Context, id string) (DataPa
 		ErrorMsg string `json:"error_message"` // partner kadang isi field ini meski status 200
 	}
 	if err := json.Unmarshal(body, &mentah); err != nil {
-		return DataPartnerBersih{}, fmt.Errorf("parse JSON partner gagal, body mentah: %s: %w", string(body), err)
+		// Potongan body membantu debugging, tapi jangan seluruhnya:
+		// body bisa besar dan bisa berisi data pribadi (NIK) yang tidak
+		// boleh menyebar ke log lewat pesan error.
+		return DataPartnerBersih{}, fmt.Errorf("parse JSON partner gagal, %d byte pertama body: %q: %w",
+			min(len(body), 200), body[:min(len(body), 200)], err)
 	}
 
 	// JEBAKAN PARTNER #2: error sesungguhnya ada di body, bukan status code.

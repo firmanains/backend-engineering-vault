@@ -46,7 +46,9 @@ sequenceDiagram
 
 Diagram ini menunjukkan prinsip inti: **deadline mengalir sebagai satu nilai absolut** (titik waktu tertentu, bukan durasi tetap) dari lapisan pertama ke lapisan berikutnya, dan setiap lapisan menghitung sisa waktu yang benar-benar tersisa dari deadline itu, bukan menetapkan durasi barunya sendiri dari nol. Ini persis apa yang dilakukan `context.WithDeadline` di Go, dibanding `context.WithTimeout` yang dipanggil ulang secara independen di setiap lapisan tanpa memperhitungkan deadline dari lapisan sebelumnya.
 
-Prinsip kedua yang sama pentingnya: **timeout di lapisan luar harus selalu lebih pendek dari total timeout lapisan-lapisan di dalamnya**, bukan lebih panjang atau sama. Kalau API gateway punya budget 3 detik, service permohonan yang dipanggilnya tidak boleh diberi budget 5 detik — itu berarti gateway bisa menyerah sebelum service permohonan sempat mencoba menyelesaikan pekerjaannya dalam batas waktu yang **diketahuinya sendiri** masih berlaku.
+Prinsip kedua yang sama pentingnya: **timeout di lapisan dalam harus selalu lebih pendek dari sisa waktu lapisan luar yang memanggilnya**. Dengan kata lain, timeout lapisan luar harus cukup untuk menampung total waktu lapisan-lapisan di dalamnya, ditambah margin. Kalau API gateway punya budget 3 detik, service permohonan yang dipanggilnya tidak boleh diberi budget 5 detik — itu berarti gateway bisa menyerah sebelum service permohonan sempat mencoba menyelesaikan pekerjaannya dalam batas waktu yang **diketahuinya sendiri** masih berlaku.
+
+Satu hal yang tidak terlihat dari diagram: deadline hanya mengalir otomatis **di dalam satu process** lewat `context.Context`. Begitu melintasi batas service lewat HTTP biasa, deadline tidak ikut terbawa, karena HTTP tidak punya mekanisme standar untuk itu. gRPC melakukannya otomatis lewat header `grpc-timeout`. Untuk HTTP, pemanggil harus mengirim sisa waktunya secara eksplisit (misalnya di header kustom yang disepakati), dan service penerima membuat `context.WithTimeout` dari nilai itu, dibatasi oleh budget maksimumnya sendiri.
 
 ## In Go
 
@@ -61,9 +63,10 @@ import (
 )
 
 func handlePermohonan(w http.ResponseWriter, r *http.Request) {
-	// context dari http.Server SUDAH membawa deadline milik client,
-	// kalau server dikonfigurasi dengan ReadTimeout/WriteTimeout yang
-	// sesuai. Di sini kita perketat lagi sesuai budget internal kita.
+	// r.Context() dibatalkan kalau client memutus koneksi, tapi TIDAK
+	// membawa deadline apa pun — HTTP biasa tidak mengirim deadline
+	// client, dan ReadTimeout/WriteTimeout server tidak dipasang ke
+	// context. Karena itu budget request ini ditetapkan eksplisit di sini.
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 
@@ -135,7 +138,7 @@ Timeout budget yang ketat berarti sebagian request akan gagal lebih cepat (dan l
 
 ## Self-Check
 
-- Kenapa timeout di lapisan luar harus selalu lebih pendek dari total timeout lapisan-lapisan di dalamnya?
+- Kenapa timeout di lapisan dalam harus selalu lebih pendek dari sisa waktu lapisan luar yang memanggilnya?
 - Apa perbedaan meneruskan `ctx` yang sudah membawa deadline dibanding membuat `context.WithTimeout` baru di setiap lapisan?
 - Kapan konsep timeout budget yang ketat kurang relevan diterapkan?
 

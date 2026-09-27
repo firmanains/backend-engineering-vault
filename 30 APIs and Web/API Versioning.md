@@ -49,9 +49,10 @@ Untuk konteks partner pemerintah/enterprise dengan fleksibilitas teknis terbatas
 Pola URL versioning dengan logika bisnis inti dibagi (bukan diduplikasi) antar versi:
 
 ```go
-mux := http.NewServeMux()
-mux.HandleFunc("GET /v1/dokumen/{id}", v1GetDokumenHandler)
-mux.HandleFunc("GET /v2/dokumen/{id}", v2GetDokumenHandler)
+func registerVersionedRoutes(mux *http.ServeMux) {
+    mux.HandleFunc("GET /v1/dokumen/{id}", v1GetDokumenHandler)
+    mux.HandleFunc("GET /v2/dokumen/{id}", v2GetDokumenHandler)
+}
 
 // Logika bisnis inti (service layer) SAMA untuk kedua versi —
 // hanya lapisan translasi response yang berbeda per versi.

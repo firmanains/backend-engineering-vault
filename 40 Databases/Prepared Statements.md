@@ -14,7 +14,7 @@ created: 2026-07-28
 
 ## TL;DR
 
-Prepared statement memisahkan **struktur query** (SQL dengan placeholder seperti `?` atau `$1`) dari **nilai parameter** (data yang disisipkan ke placeholder itu), dikirim ke database sebagai dua langkah terpisah alih-alih satu string SQL utuh. Ini menyelesaikan dua masalah sekaligus: **keamanan** (nilai parameter tidak pernah ditafsirkan sebagai bagian dari struktur SQL, menutup jalur SQL injection secara struktural) dan **performa** (database bisa menyusun rencana eksekusi sekali, lalu memakainya ulang untuk eksekusi berikutnya dengan parameter berbeda, tanpa parsing dan planning ulang dari nol). `database/sql` Go memakai prepared statement secara otomatis di balik layar setiap kali kamu memakai placeholder — kamu mendapat manfaat keamanannya bahkan tanpa memanggil `Prepare()` secara eksplisit.
+Prepared statement memisahkan **struktur query** (SQL dengan placeholder seperti `?` atau `$1`) dari **nilai parameter** (data yang disisipkan ke placeholder itu), dikirim ke database sebagai dua langkah terpisah alih-alih satu string SQL utuh. Manfaat utamanya adalah **keamanan**: nilai parameter tidak pernah ditafsirkan sebagai bagian dari struktur SQL, menutup jalur SQL injection secara struktural. Manfaat **performa** (parsing sekali, dipakai ulang untuk banyak eksekusi) lebih bersyarat: ia hanya terasa kalau statement yang sudah di-prepare benar-benar dipakai ulang, dan seberapa besar hematnya berbeda antar database. Di `database/sql` Go, cukup memakai placeholder sudah memberi proteksi injection, bahkan tanpa memanggil `Prepare()` secara eksplisit — dengan catatan mekanismenya bergantung driver (dibahas di bawah).
 
 ## The Problem
 
@@ -57,7 +57,9 @@ sequenceDiagram
     Note over DB: Rencana eksekusi yang sama dipakai ulang, tanpa parsing ulang
 ```
 
-Diagram ini menunjukkan dua manfaat sekaligus: keamanan (parameter tidak pernah masuk ke tahap `PREPARE`, hanya ke tahap `EXECUTE`) dan performa (tahap `PREPARE` yang mahal — parsing, validasi, penyusunan rencana eksekusi — hanya terjadi sekali untuk struktur query yang sama, dipakai ulang untuk `EXECUTE` berikutnya).
+Diagram ini menunjukkan dua manfaat: keamanan (parameter tidak pernah masuk ke tahap `PREPARE`, hanya ke tahap `EXECUTE`) dan performa (tahap `PREPARE` hanya terjadi sekali untuk struktur query yang sama, lalu dipakai ulang untuk `EXECUTE` berikutnya).
+
+Manfaat performa itu punya dua syarat yang sering terlewat. Pertama, `db.QueryContext(ctx, sql, args...)` biasa **tidak** memakai ulang statement: driver `go-sql-driver/mysql` menjalankan prepare, execute, lalu close untuk setiap panggilan, jadi justru butuh round-trip lebih banyak daripada query teks biasa. Penghematan baru terjadi kalau `*sql.Stmt` dibuat sekali lalu dipakai berkali-kali, seperti contoh di bawah. Kedua, yang dihemat berbeda antar database: MySQL/MariaDB terutama menghemat parsing dan tetap mengoptimasi ulang tiap eksekusi, sementara PostgreSQL bisa beralih ke rencana eksekusi generik setelah beberapa eksekusi. Driver MySQL juga punya opsi DSN `interpolateParams=true` yang mengganti prepared statement di server dengan penyisipan nilai yang di-escape di sisi client. Opsi itu mengurangi round-trip dan tetap aman untuk charset umum (seperti `utf8mb4`), tapi secara mekanis ia bukan lagi prepared statement.
 
 Untuk query yang benar-benar dieksekusi berkali-kali dengan struktur identik (misalnya dalam loop), menyiapkan `*sql.Stmt` secara eksplisit menghindari overhead "prepare ulang" implisit yang mungkin terjadi tergantung driver:
 

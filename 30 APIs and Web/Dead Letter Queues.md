@@ -20,7 +20,7 @@ created: 2026-08-02
 
 Consumer di sistem legal-services memproses event "verifikasi dokumen" dari Kafka, memanggil layanan OCR eksternal untuk membaca isi dokumen. Suatu hari, satu dokumen yang di-upload pemohon ternyata file korup — bukan PDF yang valid meski ekstensinya `.pdf`. Layanan OCR selalu gagal memprosesnya, dan consumer, yang ditulis dengan asumsi "retry sampai berhasil" (pola at-least-once yang benar untuk kegagalan sementara), terus mencoba memproses ulang pesan yang sama tanpa henti karena kegagalan ini permanen, bukan sementara.
 
-Karena consumer tidak commit offset untuk pesan yang gagal (perilaku yang benar untuk kegagalan sementara seperti timeout jaringan), pesan cacat ini tertahan di posisi offset yang sama selamanya — seluruh partition itu **berhenti maju**, karena Kafka memproses pesan di dalam satu partition secara berurutan, dan pesan setelahnya baru bisa diproses setelah pesan ini berhasil di-commit. Semua permohonan lain yang kebetulan tersebar ke partition yang sama ikut tertahan, meski dokumen mereka valid dan tidak ada masalah sama sekali — satu dokumen korup memblokir seluruh antrean di belakangnya.
+Karena consumer ditulis untuk mencoba ulang pesan yang sama di tempat sampai berhasil, baru commit setelahnya (perilaku yang benar untuk kegagalan sementara seperti timeout jaringan), pesan cacat ini membuat consumer terjebak di offset yang sama selamanya — seluruh partition itu **berhenti maju**, karena consumer memproses pesan di dalam satu partition secara berurutan, dan tidak pernah beranjak ke pesan berikutnya. Semua permohonan lain yang kebetulan tersebar ke partition yang sama ikut tertahan, meski dokumen mereka valid dan tidak ada masalah sama sekali — satu dokumen korup memblokir seluruh antrean di belakangnya.
 
 ## Intuition
 
@@ -52,6 +52,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -65,39 +67,55 @@ func prosesDenganDLQ(ctx context.Context, reader *kafka.Reader, dlqWriter *kafka
 			return fmt.Errorf("gagal mengambil pesan: %w", err)
 		}
 
-		jumlahPercobaan := hitungPercobaanSebelumnya(msg)
-		err = verifikasiDokumen(ctx, msg.Value)
-
-		switch {
-		case err == nil:
-			if err := reader.CommitMessages(ctx, msg); err != nil {
-				return fmt.Errorf("gagal commit offset: %w", err)
-			}
-
-		case jumlahPercobaan < maksimalPercobaan:
-			// Kegagalan masih dalam batas wajar — jangan commit,
-			// biarkan pesan ini dicoba ulang secara alami.
-			continue
-
-		default:
+		// Retry dilakukan DI TEMPAT untuk pesan ini. Offset Kafka bersifat
+		// posisional, jadi pesan yang gagal tidak bisa "ditinggal dulu":
+		// commit pesan berikutnya akan otomatis menganggapnya selesai.
+		if errAkhir := verifikasiDenganRetry(ctx, msg); errAkhir != nil {
 			// Sudah gagal berkali-kali — anggap gagal permanen,
 			// pindahkan ke DLQ, lalu bebaskan partition ini.
-			if pubErr := kirimKeDLQ(ctx, dlqWriter, msg, err); pubErr != nil {
+			if pubErr := kirimKeDLQ(ctx, dlqWriter, msg, errAkhir); pubErr != nil {
+				// Tanpa commit: pesan akan dibaca ulang setelah restart.
 				return fmt.Errorf("gagal mengirim ke DLQ: %w", pubErr)
 			}
-			if err := reader.CommitMessages(ctx, msg); err != nil {
-				return fmt.Errorf("gagal commit offset setelah DLQ: %w", err)
-			}
+		}
+
+		if err := reader.CommitMessages(ctx, msg); err != nil {
+			return fmt.Errorf("gagal commit offset: %w", err)
 		}
 	}
+}
+
+func verifikasiDenganRetry(ctx context.Context, msg kafka.Message) error {
+	var errTerakhir error
+	for percobaan := 1; percobaan <= maksimalPercobaan; percobaan++ {
+		if errTerakhir = verifikasiDokumen(ctx, msg.Value); errTerakhir == nil {
+			return nil
+		}
+		if percobaan == maksimalPercobaan {
+			break
+		}
+		// Backoff sederhana 1s, 2s, 4s, 8s; versi production menambahkan jitter.
+		jeda := time.Duration(1<<(percobaan-1)) * time.Second
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(jeda):
+		}
+	}
+	return fmt.Errorf("gagal setelah %d percobaan: %w", maksimalPercobaan, errTerakhir)
 }
 
 func kirimKeDLQ(ctx context.Context, writer *kafka.Writer, msg kafka.Message, penyebab error) error {
 	pesanDLQ := kafka.Message{
 		Key:   msg.Key,
 		Value: msg.Value,
+		// Metadata ini yang nanti dibaca manusia saat menyelidiki DLQ.
 		Headers: []kafka.Header{
 			{Key: "alasan-gagal", Value: []byte(penyebab.Error())},
+			{Key: "topic-asal", Value: []byte(msg.Topic)},
+			{Key: "partition-asal", Value: []byte(strconv.Itoa(msg.Partition))},
+			{Key: "offset-asal", Value: []byte(strconv.FormatInt(msg.Offset, 10))},
+			{Key: "gagal-pada", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
 		},
 	}
 	if err := writer.WriteMessages(ctx, pesanDLQ); err != nil {
@@ -107,7 +125,7 @@ func kirimKeDLQ(ctx context.Context, writer *kafka.Writer, msg kafka.Message, pe
 }
 ```
 
-Penghitungan jumlah percobaan (`hitungPercobaanSebelumnya`) di dunia nyata biasanya butuh penyimpanan terpisah (Redis atau tabel database) karena Kafka sendiri tidak melacak "berapa kali pesan ini sudah dicoba" secara bawaan — detail implementasi yang disederhanakan di contoh ini untuk fokus pada alur DLQ itu sendiri.
+Karena retry terjadi di tempat, penghitung percobaan cukup berupa variabel lokal. Harganya: selama retry berlangsung (di contoh ini, total sekitar 15 detik), partition itu memang tertahan. Itu masih wajar untuk kegagalan sesaat. Untuk gangguan yang bisa berlangsung berjam-jam (layanan OCR down), pola yang umum adalah **retry topic**: pesan gagal dipindahkan ke topic seperti `verifikasi-dokumen-retry-5m`, dicoba lagi oleh consumer terpisah setelah jeda, dan baru masuk DLQ setelah semua tingkat retry habis. Partition utama tetap bebas, dan jumlah percobaan dibawa di header pesan.
 
 ## In His Stack
 

@@ -53,18 +53,20 @@ Cache invalidation — memberi tahu semua edge location bahwa konten yang mereka
 ```go
 package edge
 
-import "net/http"
+import (
+	"net/http"
+	"strconv"
+)
 
-// CacheControlHeaders menunjukkan mekanisme PALING dasar yang
-// membuat CDN tahu berapa lama konten boleh disimpan di edge
-// sebelum dianggap usang — TANPA ini, CDN tidak tahu kapan harus
-// mengambil ulang dari origin.
+// SetCacheHeaders menunjukkan mekanisme paling dasar yang membuat CDN
+// tahu berapa lama konten boleh disimpan di edge sebelum dianggap usang.
+// Tanpa header ini, CDN tidak tahu kapan harus mengambil ulang dari origin.
 func SetCacheHeaders(w http.ResponseWriter, maxAgeSeconds int, isPublic bool) {
 	visibility := "private"
 	if isPublic {
 		visibility = "public"
 	}
-	w.Header().Set("Cache-Control", "max-age="+itoa(maxAgeSeconds)+", "+visibility)
+	w.Header().Set("Cache-Control", "max-age="+strconv.Itoa(maxAgeSeconds)+", "+visibility)
 }
 
 // ServeStaticAsset menunjukkan konten yang COCOK untuk CDN — tidak
@@ -81,13 +83,8 @@ func ServeStaticAsset(w http.ResponseWriter, r *http.Request, assetPath string) 
 // disimpan CDN publik — berbeda per pengguna, harus selalu ke origin
 // (atau memakai private cache per pengguna, BUKAN cache bersama).
 func ServePersonalizedContent(w http.ResponseWriter, r *http.Request, userID string) {
-	SetCacheHeaders(w, 0, false) // TIDAK di-cache secara publik
+	SetCacheHeaders(w, 0, false) // tidak di-cache secara publik
 	// proses personalisasi di sini
-}
-
-func itoa(n int) string {
-	// implementasi sederhana, dalam praktik pakai strconv.Itoa
-	return ""
 }
 ```
 

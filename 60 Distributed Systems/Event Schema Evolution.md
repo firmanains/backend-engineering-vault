@@ -53,7 +53,10 @@ Upcasting yang matang sering diimplementasikan sebagai rantai transformasi berur
 ```go
 package eventschema
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // RawEvent menyimpan versi EKSPLISIT — kode pembaca TIDAK PERNAH
 // berasumsi semua event punya struktur yang sama.
@@ -77,26 +80,32 @@ type DocumentVerifiedV2 struct {
 	Note       string `json:"catatan_verifikator"` // field BARU
 }
 
-// Upcast menerjemahkan event versi LAMA ke bentuk TERBARU — logika
-// bisnis di luar fungsi ini TIDAK PERNAH perlu tahu V1 pernah ada.
+// Upcast menerjemahkan event versi lama ke bentuk terbaru — logika
+// bisnis di luar fungsi ini tidak pernah perlu tahu V1 pernah ada.
 func Upcast(raw RawEvent) (DocumentVerifiedV2, error) {
 	switch raw.Version {
 	case 1:
 		var v1 DocumentVerifiedV1
 		if err := json.Unmarshal(raw.Payload, &v1); err != nil {
-			return DocumentVerifiedV2{}, err
+			return DocumentVerifiedV2{}, fmt.Errorf("upcast: parsing event v1 gagal: %w", err)
 		}
 		return DocumentVerifiedV2{
 			DocumentID: v1.DocumentID,
 			Status:     v1.Status,
-			Note:       "", // default untuk field yang TIDAK ADA di V1
+			Note:       "", // default untuk field yang tidak ada di V1
 		}, nil
 	case 2:
 		var v2 DocumentVerifiedV2
-		err := json.Unmarshal(raw.Payload, &v2)
-		return v2, err
+		if err := json.Unmarshal(raw.Payload, &v2); err != nil {
+			return DocumentVerifiedV2{}, fmt.Errorf("upcast: parsing event v2 gagal: %w", err)
+		}
+		return v2, nil
 	default:
-		return DocumentVerifiedV2{}, nil
+		// Versi yang tidak dikenali BUKAN kasus yang aman diabaikan — event
+		// dengan versi ini tidak boleh diam-diam diperlakukan sebagai event
+		// kosong. Ini biasanya berarti kode upcasting perlu diperbarui untuk
+		// mendukung versi baru, atau data event-nya rusak.
+		return DocumentVerifiedV2{}, fmt.Errorf("upcast: versi event %d tidak dikenali", raw.Version)
 	}
 }
 ```

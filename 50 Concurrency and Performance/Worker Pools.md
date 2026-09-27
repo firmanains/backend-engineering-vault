@@ -18,7 +18,7 @@ created: 2026-07-29
 
 ## The Problem
 
-Sebuah job batch memproses sepuluh ribu dokumen yang perlu di-generate thumbnail-nya, ditulis dengan meluncurkan satu goroutine per dokumen (`for _, doc := range dokumen { go generateThumbnail(doc) }`). Di lingkungan testing dengan seratus dokumen, ini bekerja cepat dan terlihat elegan. Begitu dijalankan terhadap sepuluh ribu dokumen sungguhan, aplikasi kehabisan memori dan CPU-nya jenuh — sepuluh ribu goroutine yang semuanya berusaha memproses gambar secara bersamaan bersaing memperebutkan CPU yang sama (yang mungkin hanya punya beberapa core), dan overhead penjadwalan sepuluh ribu goroutine sekaligus jauh melebihi manfaat paralelisme yang sebenarnya bisa dicapai — proses generate thumbnail yang CPU-intensive tidak menjadi lebih cepat hanya karena dijalankan di lebih banyak goroutine daripada jumlah core CPU yang tersedia untuk benar-benar memprosesnya secara paralel.
+Sebuah job batch memproses sepuluh ribu dokumen yang perlu di-generate thumbnail-nya, ditulis dengan meluncurkan satu goroutine per dokumen (`for _, doc := range dokumen { go generateThumbnail(doc) }`). Di lingkungan testing dengan seratus dokumen, ini bekerja cepat dan terlihat elegan. Begitu dijalankan terhadap sepuluh ribu dokumen sungguhan, aplikasi kehabisan memori dan CPU-nya jenuh. Setiap goroutine men-decode gambarnya ke memori pada saat yang hampir bersamaan, sehingga sepuluh ribu gambar ter-decode hidup sekaligus di heap. Sementara itu, pekerjaan yang CPU-intensive tidak menjadi lebih cepat hanya karena dibagi ke lebih banyak goroutine daripada jumlah core yang tersedia: core yang sama tetap harus bergantian, dan setiap dokumen justru selesai lebih lambat karena semuanya berjalan setengah-setengah bersamaan.
 
 Masalah kedua yang sama pentingnya: tanpa pembatasan, tidak ada cara mudah mengetahui **kapan** seluruh pekerjaan benar-benar selesai, atau menghentikan pemrosesan lebih awal kalau diperlukan (misalnya job dibatalkan operator) — sepuluh ribu goroutine independen tanpa koordinasi terpusat sulit dikelola sebagai satu kesatuan pekerjaan.
 
@@ -31,7 +31,7 @@ Analogi ini bocor pada satu hal: loket fisik punya batas ruangan yang jelas terl
 ## How It Works
 
 ```go
-package main
+package batch
 
 import (
 	"context"
@@ -176,7 +176,7 @@ Worker pool menambah kompleksitas kode (channel, sinkronisasi, penentuan jumlah 
 
 > [!success]- Kunci jawaban
 > **1.** Untuk pekerjaan CPU-bound, kecepatan pemrosesan dibatasi oleh jumlah core CPU yang benar-benar bisa menjalankan komputasi secara paralel — meluncurkan goroutine jauh melebihi jumlah core tidak membuat komputasi selesai lebih cepat (core yang sama tetap harus bergantian menjalankan goroutine-goroutine itu), sementara overhead penjadwalan (scheduler harus mengelola jauh lebih banyak goroutine) justru menambah biaya tanpa manfaat. Worker pool dengan jumlah mendekati jumlah core menghindari overhead ini sambil tetap memanfaatkan seluruh core yang tersedia secara maksimal.
-> **4.** Worker pool dengan jumlah worker yang wajar (misalnya 10-20, jauh lebih rendah dari rate limit itu sendiri karena setiap worker juga butuh waktu memproses respons), dikombinasikan dengan **rate limiter** eksplisit (token bucket, dibahas di domain `30 APIs and Web`) yang membatasi total laju request ke partner ke maksimal 50 per detik terlepas dari berapa banyak worker yang aktif. Setiap worker, sebelum mengirim request ke partner, harus mendapat "izin" dari rate limiter bersama (misalnya channel token bucket, atau library rate limiting Go seperti `golang.org/x/time/rate`) — ini memisahkan dua kekhawatiran: jumlah worker menentukan seberapa banyak permintaan bisa **disiapkan** bersamaan (termasuk parsing response, dll.), sementara rate limiter yang menentukan seberapa cepat permintaan **benar-benar dikirim** ke partner, memastikan batas 50/detik dihormati meski ada puluhan worker yang siap mengirim kapan saja.
+> **4.** Worker pool dengan jumlah worker yang dihitung dari [[Little's Law]]: kalau satu panggilan ke partner butuh sekitar 300 ms, mencapai 50 request per detik butuh sekitar $50 \times 0.3 = 15$ request yang sedang berjalan bersamaan, jadi 15–20 worker sudah cukup. Worker itu dikombinasikan dengan **rate limiter** eksplisit (token bucket, dibahas di domain `30 APIs and Web`) yang membatasi total laju request ke partner ke maksimal 50 per detik terlepas dari berapa banyak worker yang aktif. Setiap worker, sebelum mengirim request ke partner, harus mendapat "izin" dari rate limiter bersama (misalnya channel token bucket, atau library rate limiting Go seperti `golang.org/x/time/rate`) — ini memisahkan dua kekhawatiran: jumlah worker menentukan seberapa banyak permintaan bisa **disiapkan** bersamaan (termasuk parsing response, dll.), sementara rate limiter yang menentukan seberapa cepat permintaan **benar-benar dikirim** ke partner, memastikan batas 50/detik dihormati meski ada puluhan worker yang siap mengirim kapan saja.
 
 ## Self-Check
 

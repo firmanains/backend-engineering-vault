@@ -14,7 +14,7 @@ created: 2026-07-28
 
 ## TL;DR
 
-`UNION` menggabungkan hasil dua (atau lebih) query jadi satu hasil, **lalu membuang baris duplikat** — persis seperti `SELECT DISTINCT` diterapkan ke gabungan keduanya. `UNION ALL` menggabungkan tanpa membuang apa pun. Perbedaan ini terdengar kosmetik sampai kamu sadar deduplikasi butuh membandingkan **setiap baris dengan setiap baris lain** di seluruh hasil gabungan — pada dataset besar, ini bisa jadi operasi yang jauh lebih mahal daripada query itu sendiri. Memakai `UNION` padahal tahu hasilnya tidak mungkin punya duplikat (atau duplikatnya memang tidak masalah) adalah salah satu "pemborosan performa gratis" yang paling mudah dihindari.
+`UNION` menggabungkan hasil dua (atau lebih) query jadi satu hasil, **lalu membuang baris duplikat** — persis seperti `SELECT DISTINCT` diterapkan ke gabungan keduanya. `UNION ALL` menggabungkan tanpa membuang apa pun. Perbedaan ini terdengar kosmetik sampai kamu sadar deduplikasi butuh mengurutkan atau meng-hash **seluruh** hasil gabungan untuk menemukan baris yang kembar — pada dataset besar, ini bisa jadi operasi yang jauh lebih mahal daripada query itu sendiri. Memakai `UNION` padahal tahu hasilnya tidak mungkin punya duplikat (atau duplikatnya memang tidak masalah) adalah salah satu "pemborosan performa gratis" yang paling mudah dihindari.
 
 ## The Problem
 
@@ -26,7 +26,7 @@ UNION
 SELECT id, judul, 'manual' AS sumber FROM permohonan_manual;
 ```
 
-Query ini benar secara hasil, tapi lambat — jauh lebih lambat daripada dua query terpisah dijalankan berurutan. Penyebabnya: `id` di kedua tabel berasal dari sequence/auto-increment yang **berbeda** (tidak pernah bertabrakan secara desain), dan kolom `sumber` sudah membuat setiap baris otomatis unik di antara kedua sisi. Tidak ada satu pun baris yang benar-benar bisa jadi duplikat di sini — tapi `UNION` tetap memaksa database membandingkan seluruh baris satu sama lain untuk memastikan itu, pekerjaan sia-sia pada dataset yang bisa berisi jutaan baris permohonan gabungan. Mengganti `UNION` menjadi `UNION ALL` menghilangkan langkah deduplikasi yang memang tidak pernah dibutuhkan, dan laporan yang sama jadi jauh lebih cepat.
+Query ini benar secara hasil, tapi lambat — jauh lebih lambat daripada dua query terpisah dijalankan berurutan. Penyebabnya: kolom `sumber` (`'online'` vs `'manual'`) sudah membuat setiap baris dari satu sisi pasti berbeda dari baris sisi lain, bahkan kalau `id`-nya kebetulan sama (dua auto-increment terpisah bisa saja sama-sama punya `id = 1`). Duplikat di dalam satu sisi juga mustahil, karena `id` adalah primary key tabel masing-masing. Tidak ada satu pun baris yang benar-benar bisa jadi duplikat di sini — tapi `UNION` tetap memaksa database membandingkan seluruh baris satu sama lain untuk memastikan itu, pekerjaan sia-sia pada dataset yang bisa berisi jutaan baris permohonan gabungan. Mengganti `UNION` menjadi `UNION ALL` menghilangkan langkah deduplikasi yang memang tidak pernah dibutuhkan, dan laporan yang sama jadi jauh lebih cepat.
 
 ## Intuition
 

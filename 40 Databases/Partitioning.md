@@ -50,14 +50,9 @@ Diagram ini menunjukkan **partition pruning**: optimizer database memeriksa kond
 
 ## Under The Hood
 
-**Menghapus data lama menjadi operasi metadata, bukan operasi data**: alih-alih `DELETE` jutaan baris satu per satu, kebijakan retensi 90 hari bisa diimplementasikan dengan **men-drop seluruh partition** yang mewakili data lebih tua dari 90 hari (`DROP TABLE log_aktivitas_2026_04` misalnya, atau perintah `DETACH PARTITION` di PostgreSQL) — operasi ini nyaris instan karena murni menghapus referensi ke partition di level katalog, tidak perlu memindai dan menghapus baris individual sama sekali. Ini perbedaan performa yang bisa dari berjam-jam (`DELETE` jutaan baris dengan lock yang ditahan lama) menjadi hitungan detik.
+**Menghapus data lama menjadi operasi metadata, bukan operasi data**: alih-alih `DELETE` jutaan baris satu per satu, kebijakan retensi 90 hari bisa diimplementasikan dengan **men-drop seluruh partition** yang mewakili data lebih tua dari 90 hari (`DROP TABLE log_aktivitas_2026_04` misalnya, atau perintah `DETACH PARTITION` di PostgreSQL) — operasi ini nyaris instan karena murni menghapus referensi ke partition di level katalog, tanpa memindai dan menghapus baris individual. Ini perbedaan performa yang bisa dari berjam-jam (`DELETE` jutaan baris dengan lock yang ditahan lama) menjadi hitungan detik. Satu syaratnya: operasi ini tetap butuh lock eksklusif singkat atas definisi tabel (metadata lock di MySQL/MariaDB, `ACCESS EXCLUSIVE` di PostgreSQL). Kalau ada query panjang yang sedang membaca tabel itu, `DROP` menunggu query tersebut selesai, dan query baru ikut antre di belakangnya. Jalankan di luar jam sibuk, dan di PostgreSQL 14+ pertimbangkan `DETACH PARTITION ... CONCURRENTLY`.
 
-PostgreSQL native declarative partitioning (sejak versi yang mendukungnya penuh) memerlukan definisi eksplisit strategi partition (`PARTITION BY RANGE (tanggal)`) dan pembuatan partition individual sebagai tabel anak — tanpa automasi tambahan, partition baru untuk periode mendatang (misalnya bulan berikutnya) harus dibuat secara eksplisit sebelum data untuk periode itu bisa dimasukkan, sering diotomasi lewat job terjadwal yang membuat partition baru beberapa hari sebelum periode itu dimulai. MySQL/MariaDB mendukung partitioning bawaan dengan sintaks `PARTITION BY RANGE`/`LIST`/`HASH` yang serupa secara konsep, dengan detail operasional dan batasan yang berbeda dari PostgreSQL (misalnya batasan terkait foreign key dan unique constraint yang harus menyertakan kolom partition).
-
-> [!question] Perlu diverifikasi
-> Klaim: batasan spesifik MySQL/MariaDB soal foreign key dan unique constraint pada tabel yang di-partition.
-> Kenapa ragu: batasan ini cukup teknis dan detail, serta bisa berubah antar versi — perlu diverifikasi terhadap versi MariaDB yang relevan sebelum dijadikan dasar keputusan desain.
-> Cara verifikasi: dokumentasi resmi MySQL/MariaDB, bagian "Partitioning Limitations".
+PostgreSQL native declarative partitioning (diperkenalkan di PostgreSQL 10 dan jauh lebih lengkap sejak versi 11) memerlukan definisi eksplisit strategi partition (`PARTITION BY RANGE (tanggal)`) dan pembuatan partition individual sebagai tabel anak — tanpa automasi tambahan, partition baru untuk periode mendatang (misalnya bulan berikutnya) harus dibuat secara eksplisit sebelum data untuk periode itu bisa dimasukkan, sering diotomasi lewat job terjadwal yang membuat partition baru beberapa hari sebelum periode itu dimulai. MySQL/MariaDB mendukung partitioning bawaan dengan sintaks `PARTITION BY RANGE`/`LIST`/`HASH` yang serupa secara konsep. Dua batasannya paling sering mengejutkan dan paling berpengaruh pada desain. Pertama, **setiap unique key (termasuk primary key) harus menyertakan semua kolom partition**. Itulah kenapa contoh di bawah memakai `PRIMARY KEY (id, tanggal)`, bukan `id` saja; PostgreSQL punya aturan yang sama untuk unique constraint pada tabel yang di-partition. Kedua, tabel InnoDB yang di-partition **tidak mendukung foreign key** sama sekali, baik yang menunjuk keluar maupun yang ditunjuk tabel lain. Untuk tabel log dan audit, ini biasanya bisa diterima; untuk tabel inti yang banyak direlasikan, ini sering jadi alasan untuk tidak mempartisinya.
 
 ## In Go
 
@@ -95,10 +90,16 @@ func BuatTabelPartisiTanggal(ctx context.Context, db *sql.DB) error {
 // dipanggil lewat job terjadwal yang berjalan beberapa hari sebelum bulan
 // itu dimulai, memastikan partition sudah siap sebelum data pertama masuk.
 func BuatPartisiBulanan(ctx context.Context, db *sql.DB, tahun int, bulan time.Month) error {
+	// Batas bulan dihitung dalam UTC, jadi kolom tanggal juga harus
+	// disimpan dalam UTC. Kalau aplikasi menyimpan waktu lokal (WIB),
+	// batas partition akan meleset tujuh jam dari yang dikira.
 	awal := time.Date(tahun, bulan, 1, 0, 0, 0, 0, time.UTC)
 	akhir := awal.AddDate(0, 1, 0)
 	namaPartisi := fmt.Sprintf("log_aktivitas_%d_%02d", tahun, int(bulan))
 
+	// Nama tabel dan batas nilai di DDL tidak bisa dikirim sebagai parameter
+	// "?"/"$1", jadi query disusun dengan Sprintf. Ini aman hanya karena
+	// seluruh nilainya berasal dari int dan time.Time, bukan input pengguna.
 	query := fmt.Sprintf(`
 		CREATE TABLE %s PARTITION OF log_aktivitas
 		FOR VALUES FROM ('%s') TO ('%s')
@@ -124,7 +125,35 @@ func HapusPartisiKedaluwarsa(ctx context.Context, db *sql.DB, tahun int, bulan t
 
 ## In His Stack
 
-Log aktivitas dan tabel audit trail di sistem pemerintah adalah kandidat paling jelas untuk partitioning — volumenya besar, ditulis terus-menerus, jarang di-update, dan hampir selalu dikueri berdasarkan rentang waktu, persis pola akses yang paling diuntungkan partition pruning berbasis tanggal. Elasticsearch (bagian dari ekosistem kerja) menerapkan filosofi yang serupa lewat *index per time period* (misalnya satu index per hari/bulan untuk log) — konsep yang secara mengejutkan mirip dengan partitioning relasional meski implementasinya sama sekali berbeda, dan pengetahuan tentang salah satunya mempercepat pemahaman yang lain.
+Log aktivitas dan tabel audit trail di sistem pemerintah adalah kandidat paling jelas untuk partitioning — volumenya besar, ditulis terus-menerus, jarang di-update, dan hampir selalu dikueri berdasarkan rentang waktu, persis pola akses yang paling diuntungkan partition pruning berbasis tanggal. Di MariaDB, bentuk yang setara untuk log bulanan terlihat seperti ini:
+
+```sql
+CREATE TABLE log_aktivitas (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    user_id BIGINT NOT NULL,
+    aksi VARCHAR(100) NOT NULL,
+    tanggal DATETIME NOT NULL,
+    PRIMARY KEY (id, tanggal)
+)
+PARTITION BY RANGE COLUMNS (tanggal) (
+    PARTITION p2026_07 VALUES LESS THAN ('2026-08-01'),
+    PARTITION p2026_08 VALUES LESS THAN ('2026-09-01'),
+    PARTITION p_masa_depan VALUES LESS THAN (MAXVALUE)
+);
+
+-- Retensi: buang satu bulan sekaligus.
+ALTER TABLE log_aktivitas DROP PARTITION p2026_07;
+
+-- Bulan baru: pecah partition MAXVALUE, bukan menambah di belakangnya.
+ALTER TABLE log_aktivitas REORGANIZE PARTITION p_masa_depan INTO (
+    PARTITION p2026_09 VALUES LESS THAN ('2026-10-01'),
+    PARTITION p_masa_depan VALUES LESS THAN (MAXVALUE)
+);
+```
+
+Partition `MAXVALUE` berperan sebagai jaring pengaman: kalau job pembuat partition lupa berjalan, insert tetap berhasil (masuk ke `p_masa_depan`) alih-alih gagal. Selama `p_masa_depan` masih kosong, `REORGANIZE` atasnya murah. Kalau partition itu sudah sempat terisi banyak data, `REORGANIZE` harus menyalin data tersebut dan menjadi operasi berat.
+
+Elasticsearch (bagian dari ekosistem kerja) menerapkan filosofi yang serupa lewat *index per time period* (misalnya satu index per hari/bulan untuk log) — konsep yang secara mengejutkan mirip dengan partitioning relasional meski implementasinya sama sekali berbeda, dan pengetahuan tentang salah satunya mempercepat pemahaman yang lain.
 
 ## Trade-offs and When Not To Use It
 
@@ -149,8 +178,8 @@ Partitioning menambah kompleksitas operasional nyata — partition baru harus di
 4. Desain terbuka: tabel `notifikasi` di sistemmu menyimpan riwayat notifikasi yang dikirim ke pengguna, dengan kebijakan bisnis "notifikasi yang sudah dibaca dan lebih tua dari 30 hari boleh dihapus, tapi yang belum dibaca harus tetap disimpan berapa pun umurnya". Rancang strategi partitioning yang sesuai untuk kasus ini, dan jelaskan kenapa kasus ini sedikit lebih rumit dari sekadar partitioning berbasis tanggal murni seperti pada log aktivitas.
 
 > [!success]- Kunci jawaban
-> **1.** `DELETE` baris satu per satu harus memindai (atau memakai index untuk menemukan) setiap baris yang cocok kondisi, mengunci masing-masing baris selama transaksi berlangsung, dan mencatat setiap penghapusan itu ke transaction log — untuk jutaan baris, ini pekerjaan yang signifikan dan bisa menahan lock lama. `DROP PARTITION` (atau `DETACH PARTITION` diikuti `DROP TABLE`) murni operasi metadata di level katalog database — memutus referensi tabel anak dari tabel induk dan menghapus filenya, tanpa perlu memeriksa atau mengunci baris individual sama sekali, sehingga waktunya nyaris konstan tidak peduli berapa juta baris yang ada di partition itu.
-> **4.** Kasus ini lebih rumit karena kriteria penghapusan bukan murni "tanggal lebih tua dari X" — ia juga bergantung pada status `dibaca`/`belum dibaca`, sebuah kondisi yang bisa berbeda-beda **dalam** satu rentang tanggal yang sama. Partitioning murni berdasarkan tanggal tidak bisa langsung menjawab "hapus partition ini" karena partition yang sama mungkin masih mengandung notifikasi belum dibaca yang harus dipertahankan. Pendekatan yang lebih tepat: tetap partition berdasarkan tanggal untuk manfaat pruning pada query (yang mayoritas tetap memfilter berdasarkan rentang waktu), tapi kebijakan retensi tidak bisa murni `DROP PARTITION` — perlu proses terjadwal terpisah yang menjalankan `DELETE` (bukan drop partition) khusus untuk baris dengan `dibaca = true AND tanggal < now() - interval '30 days'` dalam partition yang sudah "cukup tua" (misalnya partition berumur lebih dari 30 hari), sementara partition itu sendiri baru benar-benar di-drop setelah **seluruh** barisnya (baik yang dibaca maupun belum) sudah tidak ada lagi — kombinasi partitioning untuk manfaat pruning query, dan `DELETE` bertarget untuk kebijakan retensi yang punya syarat lebih dari sekadar umur data.
+> **1.** `DELETE` baris satu per satu harus memindai (atau memakai index untuk menemukan) setiap baris yang cocok kondisi, mengunci masing-masing baris selama transaction berlangsung, dan mencatat setiap penghapusan itu ke transaction log — untuk jutaan baris, ini pekerjaan yang signifikan dan bisa menahan lock lama. `DROP PARTITION` (atau `DETACH PARTITION` diikuti `DROP TABLE`) murni operasi metadata di level katalog database — memutus referensi tabel anak dari tabel induk dan menghapus filenya, tanpa perlu memeriksa atau mengunci baris individual sama sekali, sehingga waktunya nyaris konstan tidak peduli berapa juta baris yang ada di partition itu.
+> **4.** Kasus ini lebih rumit karena kriteria penghapusan bukan murni "tanggal lebih tua dari X" — ia juga bergantung pada status `dibaca`/`belum dibaca`, sebuah kondisi yang bisa berbeda-beda **dalam** satu rentang tanggal yang sama. Partitioning murni berdasarkan tanggal tidak bisa langsung menjawab "hapus partition ini" karena partition yang sama mungkin masih mengandung notifikasi belum dibaca yang harus dipertahankan. Pendekatan yang lebih tepat: tetap partition berdasarkan tanggal untuk manfaat pruning pada query (yang mayoritas tetap memfilter berdasarkan rentang waktu), tapi kebijakan retensi tidak bisa murni `DROP PARTITION` — perlu proses terjadwal terpisah yang menjalankan `DELETE` (bukan drop partition) khusus untuk baris dengan `dibaca = true AND tanggal < now() - interval '30 days'` dalam partition yang sudah "cukup tua" (misalnya partition berumur lebih dari 30 hari), sementara partition itu sendiri baru benar-benar di-drop setelah **seluruh** barisnya (baik yang dibaca maupun belum) sudah tidak ada lagi — kombinasi partitioning untuk manfaat pruning query, dan `DELETE` bertarget untuk kebijakan retensi yang punya syarat lebih dari sekadar umur data. Alternatif yang sering lebih bersih: saat sebuah partition melewati 30 hari, pindahkan dulu notifikasi yang belum dibaca ke tabel terpisah (misalnya `notifikasi_tertunda`), lalu drop partition-nya utuh. Retensi tetap murah, dan aturan "yang belum dibaca disimpan selamanya" ditangani oleh tabel yang memang dirancang untuk itu.
 
 ## Self-Check
 

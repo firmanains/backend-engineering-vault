@@ -63,8 +63,10 @@ type DokumenResponse struct {
 
 // Routing mencerminkan resource model yang sudah didesain,
 // terlepas dari bagaimana data itu sebenarnya disimpan di database.
-mux.HandleFunc("GET /pemohon/{pemohonID}/dokumen", listDokumenByPemohon)
-mux.HandleFunc("GET /dokumen/{id}", getDokumenByID)
+func registerRoutes(mux *http.ServeMux) {
+    mux.HandleFunc("GET /pemohon/{pemohonID}/dokumen", listDokumenByPemohon)
+    mux.HandleFunc("GET /dokumen/{id}", getDokumenByID)
+}
 
 func listDokumenByPemohon(w http.ResponseWriter, r *http.Request) {
     pemohonID := r.PathValue("pemohonID")

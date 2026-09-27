@@ -53,10 +53,11 @@ Diagram ini menunjukkan bahwa load shedding yang baik tidak menolak secara acak 
 package main
 
 import (
-	"fmt"
+	"errors"
+	"log"
 	"net/http"
-	"runtime"
 	"sync/atomic"
+	"time"
 )
 
 type LoadShedder struct {
@@ -92,11 +93,13 @@ func contohPenggunaan() {
 	mux.HandleFunc("/status", handleStatus)
 
 	server := &http.Server{
-		Addr:    ":8080",
-		Handler: shedder.Middleware(mux),
+		Addr:              ":8080",
+		Handler:           shedder.Middleware(mux),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
-	fmt.Println("Jumlah CPU tersedia:", runtime.NumCPU())
-	server.ListenAndServe()
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("server berhenti: %v", err)
+	}
 }
 ```
 

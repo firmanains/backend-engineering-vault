@@ -91,10 +91,13 @@ func RefundPayment(ctx context.Context, originalPaymentID string, amount int64, 
 // "menarik kembali" notifikasi asli yang sudah dibaca.
 func NotifyCancellation(ctx context.Context, originalNotificationID string, recipient string) error {
 	message := fmt.Sprintf(
-		"Proses terkait notifikasi %s telah DIBATALKAN. Mohon abaikan tindakan yang sudah dimulai berdasarkan notifikasi tersebut.",
+		"Proses terkait notifikasi %s telah dibatalkan. Mohon abaikan tindakan yang sudah dimulai berdasarkan notifikasi tersebut.",
 		originalNotificationID,
 	)
-	return sendNotification(ctx, recipient, message)
+	if err := sendNotification(ctx, recipient, message); err != nil {
+		return fmt.Errorf("compensating: kirim notifikasi pembatalan untuk %s: %w", originalNotificationID, err)
+	}
+	return nil
 }
 
 func recordRefundTransaction(ctx context.Context, action CompensatingAction, amount int64) error { return nil }

@@ -18,9 +18,9 @@ Slice di Go bukan array — ia adalah **header kecil** berisi tiga hal: pointer 
 
 ## The Problem
 
-Bayangkan sebuah function yang menerima slice `[]byte` berisi potongan dokumen, dan dimaksudkan untuk menambahkan beberapa byte metadata di akhirnya sebelum dikirim ke partner. Kadang perubahan itu "terlihat" oleh kode pemanggil, kadang tidak — perilakunya terasa acak, padahal sebenarnya sepenuhnya deterministik: tergantung apakah slice yang dioper masih punya kapasitas cadangan (`cap > len`) di titik itu atau tidak.
+Bayangkan sebuah function yang menerima slice `[]byte` berisi potongan dokumen, menambahkan metadata di akhirnya, lalu mengembalikan hasilnya. Pemanggil menyimpan hasil itu untuk dikirim ke partner, lalu memakai slice aslinya lagi untuk menambahkan penanda lain. Kadang data yang dikirim ke partner ikut rusak, kadang tidak. Perilakunya terasa acak, padahal sepenuhnya deterministik: semuanya bergantung pada apakah slice asli masih punya kapasitas cadangan (`cap > len`).
 
-Kalau masih ada kapasitas cadangan, `append()` di dalam function menulis langsung ke underlying array yang sama yang dipegang slice pemanggil — perubahan terlihat. Kalau kapasitas sudah pas habis, `append()` mengalokasikan array baru sepenuhnya, dan slice pemanggil (yang masih menunjuk array lama) tidak pernah melihat perubahan itu. Bug seperti ini terkenal sulit dilacak karena ia **tidak selalu muncul** — hanya muncul di kondisi kapasitas tertentu yang mungkin berbeda antara environment development dan production tergantung ukuran data yang diproses.
+Kalau masih ada kapasitas cadangan, kedua `append()` menulis ke underlying array yang sama, di posisi yang sama, sehingga append kedua menimpa metadata milik slice pertama. Kalau kapasitas sudah pas habis, append pertama sudah pindah ke array baru, dan keduanya tidak saling mengganggu. Bug seperti ini terkenal sulit dilacak karena ia **tidak selalu muncul**. Ia hanya muncul di kondisi kapasitas tertentu, yang bisa berbeda antara development dan production tergantung dari mana slice itu berasal.
 
 ## Intuition
 
@@ -50,7 +50,12 @@ Diagram ini menunjukkan tiga keadaan: sub-slicing dan append yang masih muat ber
 Bug aliasing dari sub-slicing, dan bug append yang perilakunya bergantung kapasitas:
 
 ```go
-// Bug 2: append yang perilakunya bergantung kapasitas.
+package main
+
+import "fmt"
+
+// Menambahkan metadata di akhir slice. Aman atau tidaknya bergantung
+// pada kapasitas slice yang dioper, bukan pada kode function ini.
 func tambahMetadata(data []byte) []byte {
     return append(data, []byte("-METADATA")...)
 }
@@ -60,25 +65,27 @@ func main() {
     original := []int{1, 2, 3, 4, 5}
     potongan := original[1:3] // [2, 3] — BERBAGI array yang sama dengan original
     potongan[0] = 99
-    fmt.Println(original) // [1, 99, 3, 4, 5] — original ikut berubah!
+    fmt.Println(original) // [1 99 3 4 5] — original ikut berubah!
 
-    // Kasus A: slice dengan cap PAS-PAS SAMA dengan len — append memicu realokasi.
-    a := make([]byte, 3, 3) // len=3, cap=3, TIDAK ada ruang cadangan
-    copy(a, []byte("abc"))
-    b := tambahMetadata(a)
-    fmt.Println(string(a)) // "abc" — TIDAK berubah, array baru dibuat untuk b
-    fmt.Println(string(b)) // "abc-METADATA"
+    // Bug 2, Kasus A: cap pas-pasan (cap == len), append memicu realokasi.
+    a := make([]byte, 3, 3)
+    copy(a, "abc")
+    b := tambahMetadata(a)         // b pindah ke array baru
+    lainA := append(a, "-LAIN"...) // juga pindah ke array baru, terpisah dari b
+    fmt.Println(string(b))         // "abc-METADATA" — aman
+    fmt.Println(string(lainA))     // "abc-LAIN"
 
-    // Kasus B: slice dengan cap lebih besar dari len — append menulis di tempat.
-    c := make([]byte, 3, 20) // len=3, cap=20, ADA ruang cadangan
-    copy(c, []byte("abc"))
-    d := tambahMetadata(c)
-    fmt.Println(string(c[:12])) // ikut berubah! menulis ke array yang sama
-    fmt.Println(string(d))      // "abc-METADATA"
+    // Bug 2, Kasus B: ada kapasitas cadangan, append menulis di tempat.
+    c := make([]byte, 3, 20)
+    copy(c, "abc")
+    d := tambahMetadata(c)         // menulis "-METADATA" ke array milik c
+    lainC := append(c, "-LAIN"...) // menulis "-LAIN" ke posisi yang SAMA
+    fmt.Println(string(lainC))     // "abc-LAIN"
+    fmt.Println(string(d))         // "abc-LAINDATA" — metadata d tertimpa!
 }
 ```
 
-Perilaku `tambahMetadata` berbeda total antara Kasus A dan B, meski kodenya identik persis — satu-satunya yang berbeda adalah kapasitas cadangan slice yang dioper. Ini persis bug yang dijelaskan di "The Problem".
+Perilaku Kasus A dan B berbeda total meski kodenya identik. Satu-satunya yang berbeda adalah kapasitas cadangan slice `a` dan `c`. Perhatikan juga bahwa `c` sendiri tetap terbaca `"abc"`, karena `len`-nya tidak berubah. Yang rusak adalah slice *lain* yang berbagi array dengannya. Ini persis bug yang dijelaskan di "The Problem". Perbaikan paling sederhana di sisi function adalah tidak menulis ke array milik pemanggil sama sekali, misalnya dengan `slices.Clip(data)` sebelum `append` (memaksa realokasi) atau menyalin ke slice baru lebih dulu.
 
 ## In His Stack
 
@@ -99,7 +106,7 @@ Berbagi underlying array lewat sub-slicing itu **cepat** (tidak ada penyalinan) 
 > Mem-*slice* sebagian kecil dari array/slice yang sangat besar dan menyimpan slice kecil itu untuk jangka panjang, tanpa sadar seluruh underlying array besar tetap hidup di memori (tidak bisa di-garbage-collect) selama slice kecil itu masih dipegang — karena slice header masih menunjuk ke array besar yang sama.
 
 > [!warning] Jebakan
-> Mengoper slice ke function dengan asumsi ia berperilaku seperti value type yang sepenuhnya terisolasi (seperti struct biasa). Slice selalu berbagi underlying array kecuali secara eksplisit disalin — mengubah elemen (bukan menambah lewat `append`) di dalam function **selalu** terlihat oleh pemanggil, terlepas dari kapasitas.
+> Mengoper slice ke function dengan asumsi ia berperilaku seperti value type yang sepenuhnya terisolasi (seperti struct biasa). Slice selalu berbagi underlying array kecuali secara eksplisit disalin — mengubah elemen (bukan menambah lewat `append`) di dalam function terlihat oleh pemanggil, terlepas dari kapasitas, selama function itu tidak lebih dulu melakukan `append` yang memicu realokasi.
 
 ## Exercises
 

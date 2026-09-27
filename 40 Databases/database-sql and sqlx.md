@@ -91,15 +91,17 @@ Diagram ini menunjukkan `sqlx` sebagai lapisan kenyamanan opsional di atas `data
 ## In Go
 
 ```go
-package main
+package repository
 
 import (
 	"context"
 	"fmt"
 
 	"github.com/jmoiron/sqlx"
-	_ "github.com/go-sql-driver/mysql"
 )
+
+// Driver MySQL didaftarkan sekali di package main lewat blank import
+// (_ "github.com/go-sql-driver/mysql"), bukan di setiap repository.
 
 type Permohonan struct {
 	ID         int    `db:"id"`
@@ -137,7 +139,7 @@ func (r *PermohonanRepository) AmbilByInstansi(ctx context.Context, instansiID i
 
 ## In His Stack
 
-Yii2 `ActiveRecord` melakukan pemetaan kolom-ke-property secara otomatis lewat reflection PHP, sesuatu yang terasa "gratis" dan mungkin membuat `Scan()` manual `database/sql` Go terasa seperti kemunduran — tapi ini justru perbedaan filosofi bahasa yang disengaja: Go tidak punya reflection implisit di jalur eksekusi normal (reflection eksplisit yang dipakai `sqlx` di baliknya punya biaya performa yang diketahui dan bisa diukur, dibahas lebih dalam di [[../20 Go Language/_Overview|Go Language Overview]]), sehingga developer Go memilih secara sadar kapan mengorbankan sedikit performa itu (`sqlx.StructScan`) demi keterbacaan, dan kapan tetap memakai `Scan()` manual untuk jalur yang benar-benar sensitif performa (misalnya query yang dijalankan jutaan kali per hari).
+Yii2 `ActiveRecord` melakukan pemetaan kolom-ke-atribut secara otomatis berdasarkan metadata skema tabel, sesuatu yang terasa "gratis" dan mungkin membuat `Scan()` manual `database/sql` Go terasa seperti kemunduran — tapi ini justru perbedaan filosofi bahasa yang disengaja: Go tidak punya reflection implisit di jalur eksekusi normal (reflection eksplisit yang dipakai `sqlx` di baliknya punya biaya performa yang diketahui dan bisa diukur, dibahas lebih dalam di [[../20 Go Language/Reflection and Its Costs|Reflection and Its Costs]]), sehingga developer Go memilih secara sadar kapan mengorbankan sedikit performa itu (`sqlx.StructScan`) demi keterbacaan, dan kapan tetap memakai `Scan()` manual untuk jalur yang benar-benar sensitif performa (misalnya query yang dijalankan jutaan kali per hari).
 
 ## Trade-offs and When Not To Use It
 
@@ -176,7 +178,7 @@ Yii2 `ActiveRecord` melakukan pemetaan kolom-ke-property secara otomatis lewat r
 
 - [[Basic Isolation Levels]] — `sql.TxOptions{Isolation: ...}` adalah bagian dari `database/sql` yang dipakai langsung untuk mengatur isolation level dari kode Go.
 - [[../20 Go Language/Interfaces and Implicit Satisfaction|Interfaces and Implicit Satisfaction]] — `database/sql` sendiri adalah contoh nyata desain lewat interface: driver berbeda-beda mengimplementasikan interface yang sama tanpa `database/sql` perlu tahu detail masing-masing.
-- [[Prepared Statements]] — `Query`/`Exec`/`QueryRow` di `database/sql` secara otomatis memakai prepared statement di balik layar untuk parameter placeholder (`?`/`$1`), dibahas lebih dalam di note berikutnya.
+- [[Prepared Statements]] — dengan sebagian besar driver, `Query`/`Exec`/`QueryRow` yang membawa parameter placeholder (`?`/`$1`) memakai prepared statement di balik layar; detail dan pengecualiannya (misalnya `interpolateParams`) dibahas di note itu.
 - [[Connection Pooling]] — `*sql.DB` bukan koneksi tunggal, melainkan pool koneksi yang dikelola otomatis; perilaku pool inilah yang dibahas mendalam di note itu.
 - [[Database Transactions]] — `sql.Tx` dan `sqlx.Tx` sama-sama membungkus mekanisme transaction yang dibahas di note itu, dengan API yang konsisten dengan `DB`/`Query`/`Exec` biasa.
 

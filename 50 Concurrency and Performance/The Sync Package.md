@@ -139,7 +139,7 @@ PHP/Yii2 klasik jarang butuh mutex secara eksplisit karena model eksekusi per-re
 
 ## Trade-offs and When Not To Use It
 
-Mutex menambah kompleksitas dan risiko baru (deadlock kalau lupa `Unlock`, atau mengunci ulang mutex yang sama secara tidak sengaja) — untuk kasus yang bisa diselesaikan lebih sederhana lewat channel (komunikasi data, bukan sekadar proteksi akses), filosofi "communicate by sharing memory" lewat channel seringkali menghasilkan kode yang lebih mudah dipahami alurnya. Aturan praktis yang umum dipegang komunitas Go: pakai mutex untuk melindungi **state bersama sederhana** (counter, cache, map) yang diakses banyak goroutine tapi tidak perlu "mengalir" sebagai pesan; pakai channel untuk **mengalirkan data** antar goroutine atau mengoordinasikan alur kerja yang lebih kompleks. Untuk kode yang sangat sensitif performa dengan operasi sederhana (increment counter), `sync/atomic` (operasi atomik tingkat rendah tanpa lock sama sekali) bisa lebih efisien dibanding mutex, meski dengan API yang lebih terbatas.
+Mutex menambah kompleksitas dan risiko baru (deadlock kalau lupa `Unlock`, atau mengunci ulang mutex yang sama secara tidak sengaja) — untuk kasus yang bisa diselesaikan lebih sederhana lewat channel (komunikasi data, bukan sekadar proteksi akses), filosofi "share memory by communicating" lewat channel seringkali menghasilkan kode yang lebih mudah dipahami alurnya. Aturan praktis yang umum dipegang komunitas Go: pakai mutex untuk melindungi **state bersama sederhana** (counter, cache, map) yang diakses banyak goroutine tapi tidak perlu "mengalir" sebagai pesan; pakai channel untuk **mengalirkan data** antar goroutine atau mengoordinasikan alur kerja yang lebih kompleks. Untuk kode yang sangat sensitif performa dengan operasi sederhana (increment counter), `sync/atomic` (operasi atomik tingkat rendah tanpa lock sama sekali) bisa lebih efisien dibanding mutex, meski dengan API yang lebih terbatas.
 
 ## Common Mistakes
 
@@ -148,6 +148,9 @@ Mutex menambah kompleksitas dan risiko baru (deadlock kalau lupa `Unlock`, atau 
 
 > [!warning] Jebakan
 > Memanggil `wg.Add()` di dalam goroutine yang diluncurkan, bukan sebelum `go func()` dipanggil — menciptakan race condition antara `Add()` dan `Wait()` yang bisa membuat `Wait()` kembali lebih awal dari seharusnya.
+
+> [!warning] Jebakan
+> Menyalin struct yang berisi `sync.Mutex` (misalnya lewat method dengan value receiver, atau `salinan := *counter`). Salinan itu membawa mutex-nya sendiri, sehingga goroutine yang memakai salinan dan yang memakai aslinya tidak saling melindungi sama sekali. Pakai pointer receiver untuk tipe yang berisi mutex; `go vet` (pemeriksaan `copylocks`) menangkap sebagian besar kasus ini.
 
 > [!warning] Jebakan
 > Lupa `Unlock()` (terutama di jalur kode dengan banyak early return) — selalu pakai `defer mu.Unlock()` tepat setelah `Lock()` untuk menjamin lock dilepas apa pun yang terjadi di dalam fungsi, termasuk saat panic.
@@ -161,7 +164,7 @@ Mutex menambah kompleksitas dan risiko baru (deadlock kalau lupa `Unlock`, atau 
 
 > [!success]- Kunci jawaban
 > **1.** `counter++` sebenarnya terdiri dari tiga langkah terpisah di level mesin: membaca nilai `counter` saat ini, menambahkannya dengan satu, dan menyimpan hasilnya kembali. Kalau dua goroutine menjalankan ketiga langkah ini hampir bersamaan, keduanya bisa membaca nilai **awal yang sama** sebelum salah satu sempat menyimpan hasilnya — goroutine kedua menimpa hasil goroutine pertama dengan nilai yang dihitung dari data yang sudah usang, sehingga satu increment "hilang" secara efektif.
-> **4.** Beban kerja ini didominasi baca (ribuan baca per detik) dengan tulis yang sangat jarang (sekali per menit) — `RWMutex` memungkinkan **seluruh** ribuan pembaca itu mengakses cache **bersamaan** tanpa saling menunggu (karena `RLock` tidak eksklusif terhadap `RLock` lain), hanya tertahan sesaat saat refresh sekali per menit terjadi (yang butuh `Lock` eksklusif). Dengan `sync.Mutex` biasa, setiap satu dari ribuan pembaca itu harus **antre satu per satu** untuk mendapat lock, meski secara logis membaca bersamaan sepenuhnya aman — dampaknya throughput baca bisa jauh lebih rendah dengan `Mutex` biasa dibanding `RWMutex`, karena `Mutex` menciptakan kontensi yang sebenarnya tidak perlu ada untuk operasi baca yang aman dilakukan konkuren.
+> **4.** Beban kerja ini didominasi baca (ribuan per detik) dengan tulis yang sangat jarang (sekali per menit). `RWMutex` memungkinkan pembaca memegang `RLock` bersamaan tanpa saling menunggu, dan hanya tertahan sesaat saat refresh mengambil `Lock` eksklusif. Dengan `sync.Mutex` biasa, setiap pembaca antre satu per satu meski membaca bersamaan sebenarnya aman. Tapi jangan menebak besarnya dampak: kalau bagian yang dilindungi hanya satu lookup map yang sangat singkat, `RWMutex` sendiri punya overhead (penghitung pembaca bersama yang diperebutkan banyak core), dan selisihnya terhadap `Mutex` bisa kecil. Ukur dengan benchmark paralel (`b.RunParallel`) sebelum menyimpulkan. Untuk pola "dibaca terus, diganti utuh sekali per menit", ada pilihan yang sering lebih baik dari keduanya: simpan map sebagai nilai **immutable** di balik `atomic.Pointer[map[string]string]`. Refresh membangun map baru lalu menukar pointer-nya dengan `Store`; pembaca cukup `Load` tanpa lock sama sekali. Syaratnya, map yang sudah dipublikasikan tidak boleh diubah lagi.
 
 ## Self-Check
 

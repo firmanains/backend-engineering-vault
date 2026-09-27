@@ -34,18 +34,30 @@ Analogi ini bocor pada satu hal: kamera thermal memberi hasil instan tanpa mengu
 package main
 
 import (
+	"log"
 	"net/http"
 	_ "net/http/pprof" // side-effect import: mendaftarkan handler pprof
 	                    // di http.DefaultServeMux secara otomatis
+	"runtime"
 )
 
 func main() {
-	// Endpoint pprof (CPU, heap, goroutine, dll.) otomatis tersedia di
-	// /debug/pprof/ pada port ini, TERPISAH dari server aplikasi utama
-	// untuk menghindari mengekspos endpoint debug ke publik.
-	go http.ListenAndServe("localhost:6060", nil)
+	// Block dan mutex profile MATI secara default. Tanpa dua baris ini,
+	// /debug/pprof/block dan /debug/pprof/mutex selalu kosong.
+	runtime.SetBlockProfileRate(10_000)  // sampel event blocking >= ~10µs
+	runtime.SetMutexProfileFraction(100) // sampel ~1 dari 100 kontensi mutex
 
-	// ... server aplikasi utama berjalan seperti biasa ...
+	// Endpoint pprof tersedia di /debug/pprof/ pada port ini, terpisah dari
+	// server aplikasi utama dan hanya di localhost supaya tidak terekspos.
+	go func() {
+		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+			log.Printf("server pprof berhenti: %v", err)
+		}
+	}()
+
+	// ... server aplikasi utama berjalan seperti biasa, dengan mux-nya
+	// SENDIRI (http.NewServeMux). Kalau aplikasi juga memakai
+	// DefaultServeMux, endpoint pprof ikut terekspos di port publiknya.
 }
 ```
 
@@ -70,6 +82,8 @@ flowchart TD
     A --> D["Goroutine Profile\nStack trace SETIAP\ngoroutine yang hidup"]
     A --> E["Block/Mutex Profile\nGoroutine mana yang\npaling lama MENUNGGU\n(lock, channel)"]
 ```
+
+Block profile mencatat goroutine yang menunggu **primitif sinkronisasi** (channel, mutex, `select`, `WaitGroup`), bukan menunggu I/O jaringan atau syscall. Waktu yang dihabiskan menunggu respons database lewat jaringan tidak terlihat di CPU profile (goroutine yang menunggu tidak memakai CPU) dan juga tidak di block profile. Untuk pertanyaan "berapa lama kita menunggu database", alat yang tepat adalah distributed tracing atau metrik durasi query, bukan pprof.
 
 Diagram ini menunjukkan empat jenis profil paling umum, masing-masing menjawab pertanyaan performa yang berbeda — memilih jenis profil yang salah untuk masalah yang dihadapi (misalnya CPU profile untuk masalah yang sebenarnya soal goroutine yang macet menunggu lock) tidak akan menunjukkan apa pun yang berguna.
 
@@ -150,7 +164,7 @@ Profiling menambah overhead nyata selama pengukuran berlangsung — CPU profilin
 
 > [!success]- Kunci jawaban
 > **1.** CPU profile menjawab "di fungsi/baris mana **waktu CPU** dihabiskan" — relevan untuk masalah performa yang disebabkan komputasi berat atau operasi yang memblokir CPU. Heap profile menjawab "di fungsi mana **memori** dialokasikan (dan berapa banyak yang masih dipakai)" — relevan untuk masalah memori tinggi, kecurigaan memory leak, atau untuk mengurangi tekanan GC lewat pengurangan alokasi.
-> **4.** Ambil CPU profile dari endpoint yang bermasalah selama periode traffic normal (`go tool pprof http://host:6060/debug/pprof/profile?seconds=30`), lalu jalankan `top10` di sesi interaktif pprof — kalau waktu CPU didominasi fungsi yang berkaitan dengan driver database (menunggu I/O query, meski ini sebenarnya lebih tepat dilihat lewat block profile atau tracing eksternal karena waktu **menunggu** I/O tidak selalu sepenuhnya tertangkap CPU profile berbasis sampling), itu mendukung dugaan "query database lambat". Kalau waktu CPU didominasi fungsi `encoding/json` atau fungsi custom marshalling, itu mendukung dugaan "JSON marshalling tidak efisien". Kombinasikan dengan `list NamaFungsi` untuk melihat baris spesifik yang paling banyak menghabiskan waktu dalam fungsi yang teridentifikasi — memberi jawaban berbasis data konkret alih-alih memperdebatkan dua dugaan tanpa bukti, dan berpotensi mengungkap bahwa kedua dugaan sama-sama salah dan penyebab sesungguhnya ada di tempat yang tidak pernah disebutkan dalam perdebatan awal.
+> **4.** Dua dugaan ini butuh alat yang berbeda, dan mengenalinya adalah separuh jawaban. JSON marshalling adalah kerja CPU, jadi CPU profile menjawabnya: ambil profil selama traffic normal (`go tool pprof http://host:6060/debug/pprof/profile?seconds=30`), jalankan `top10`, lalu `list` pada fungsi teratas. Kalau `encoding/json` (atau fungsi marshalling custom) mendominasi, dugaan kedua terkonfirmasi, dan heap profile mode `alloc_space` biasanya menunjukkan alokasi besar di tempat yang sama. Query database yang lambat adalah **waktu menunggu** jaringan, yang tidak muncul di CPU profile maupun block profile. Untuk dugaan pertama, lihat span database di distributed tracing, metrik durasi query dari driver, atau slow query log di MariaDB. Kalau CPU profile tidak menunjukkan hotspot yang berarti tapi latency endpoint tetap tinggi, itu sendiri petunjuk kuat bahwa waktunya habis untuk menunggu, bukan menghitung. Kedua sumber data ini sering mengungkap bahwa penyebab sebenarnya tidak disebut sama sekali dalam perdebatan awal.
 
 ## Self-Check
 

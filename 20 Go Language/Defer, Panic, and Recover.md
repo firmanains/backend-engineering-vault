@@ -14,7 +14,7 @@ created: 2026-07-26
 
 ## TL;DR
 
-`defer` menjadwalkan pemanggilan sebuah function agar dijalankan **tepat sebelum function yang mengelilinginya selesai** — dipakai luas untuk cleanup (`Close`, `Unlock`). Beberapa `defer` dijalankan dalam urutan **LIFO** (yang terakhir didaftarkan, dijalankan pertama). `panic` menghentikan alur normal dan mulai "membongkar" stack pemanggilan, menjalankan setiap `defer` di sepanjang jalan sambil naik; `recover()` bisa menghentikan proses pembongkaran itu, **tapi hanya kalau dipanggil langsung di dalam sebuah function yang di-defer** — dipanggil di tempat lain, ia tidak berbuat apa-apa. Memahami detail ini penting karena satu goroutine yang panic tanpa `recover` bisa mematikan **seluruh process Go**, bukan hanya request yang sedang ditanganinya.
+`defer` menjadwalkan pemanggilan sebuah function agar dijalankan **tepat sebelum function yang mengelilinginya selesai** — dipakai luas untuk cleanup (`Close`, `Unlock`). Beberapa `defer` dijalankan dalam urutan **LIFO** (yang terakhir didaftarkan, dijalankan pertama). `panic` menghentikan alur normal dan mulai "membongkar" stack pemanggilan, menjalankan setiap `defer` di sepanjang jalan sambil naik; `recover()` bisa menghentikan proses pembongkaran itu, **tapi hanya kalau dipanggil langsung di dalam sebuah function yang di-defer** — dipanggil di tempat lain, ia tidak berbuat apa-apa. Memahami detail ini penting karena satu goroutine yang panic tanpa `recover` bisa mematikan **seluruh process Go**, bukan hanya request yang sedang ditanganinya. Pengecualiannya adalah goroutine handler milik server `net/http`: server itu memasang `recover` sendiri, mencatat panic-nya, lalu menutup koneksi tersebut. Goroutine yang kamu spawn sendiri tidak punya perlindungan itu.
 
 ## The Problem
 
@@ -91,7 +91,7 @@ func prosesSatuFile(path string) error {
 }
 ```
 
-Middleware `recover` untuk mencegah satu request yang panic mematikan seluruh server, langsung menjawab masalah kedua di "The Problem":
+Middleware `recover` supaya panic di handler menghasilkan response `500` yang rapi dan tercatat di log aplikasi:
 
 ```go
 func recoverMiddleware(next http.Handler) http.Handler {
@@ -107,11 +107,13 @@ func recoverMiddleware(next http.Handler) http.Handler {
 }
 ```
 
-Perlu diingat: `recover()` di middleware ini **hanya** melindungi goroutine yang menangani request HTTP itu sendiri. Goroutine terpisah yang di-spawn dari dalam handler (`go doSomethingAsync()`) **tidak** dilindungi oleh `recover` ini — goroutine baru itu butuh `recover`-nya sendiri kalau tidak ingin panic di dalamnya mematikan seluruh process.
+Perlu diketahui apa yang sebenarnya ditambahkan middleware ini. Server `net/http` sudah menangkap panic di goroutine handler: ia menulis stack trace ke log server lalu menutup koneksinya, jadi process tidak mati. Tanpa middleware, client hanya melihat koneksi terputus tanpa response apa pun, dan panic-nya tidak masuk ke logging terstruktur aplikasimu. Middleware ini memperbaiki kedua hal itu.
+
+Yang lebih penting: `recover()` di middleware ini **hanya** melindungi goroutine yang menangani request HTTP itu sendiri. Goroutine terpisah yang di-spawn dari dalam handler (`go doSomethingAsync()`) **tidak** dilindungi oleh `recover` ini — goroutine baru itu butuh `recover`-nya sendiri kalau tidak ingin panic di dalamnya mematikan seluruh process.
 
 ## In His Stack
 
-**PHP** tidak punya `defer`/`panic`/`recover` dalam bentuk yang sama — padanan terdekatnya adalah `try`/`finally`, yang secara sintaks terikat pada blok kode tertentu, bukan otomatis terikat pada seluruh sisa function seperti `defer`. Perbedaan yang lebih penting secara operasional: fatal error tak tertangani di PHP-FPM klasik hanya mematikan **satu worker request** itu (lihat [[../10 Foundations/Processes vs Threads|Processes vs Threads]]), sementara panic tak tertangani di Go bisa mematikan **seluruh process** yang sedang melayani banyak request sekaligus — inilah kenapa middleware `recover` di setiap boundary goroutine jauh lebih kritis di Go dibanding menangani fatal error di PHP.
+**PHP** tidak punya `defer`/`panic`/`recover` dalam bentuk yang sama — padanan terdekatnya adalah `try`/`finally`, yang secara sintaks terikat pada blok kode tertentu, bukan otomatis terikat pada seluruh sisa function seperti `defer`. Perbedaan yang lebih penting secara operasional: fatal error tak tertangani di PHP-FPM klasik hanya mematikan **satu worker request** itu (lihat [[../10 Foundations/Processes vs Threads|Processes vs Threads]]), sementara panic tak tertangani di goroutine yang kamu spawn sendiri bisa mematikan **seluruh process** yang sedang melayani banyak request sekaligus. Inilah kenapa `recover` di setiap boundary goroutine jauh lebih kritis di Go dibanding menangani fatal error di PHP.
 
 ## Trade-offs and When Not To Use It
 

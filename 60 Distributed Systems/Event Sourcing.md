@@ -53,7 +53,6 @@ Event sourcing juga mengubah cara berpikir tentang "menghapus" data — dalam mo
 package eventsourcing
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -74,36 +73,42 @@ type CaseState struct {
 	History []Event // untuk kebutuhan audit, riwayat tetap terlihat
 }
 
+// applyEvent menerapkan SATU event ke state — logika ini dipakai baik
+// oleh Rebuild (dari awal) maupun RebuildFromSnapshot (dari snapshot),
+// supaya keduanya tidak bisa diam-diam berbeda perilaku.
+func applyEvent(state *CaseState, e Event) {
+	switch e.Type {
+	case "KasusDiajukan":
+		state.Status = "diajukan"
+	case "DokumenDiverifikasi":
+		state.Status = "diverifikasi"
+	case "DitinjauUlang":
+		state.Status = "ditinjau_ulang"
+	case "KasusDisetujui":
+		state.Status = "disetujui"
+	}
+	state.History = append(state.History, e)
+}
+
 // Rebuild menunjukkan gagasan inti event sourcing: state SEKARANG
 // dihasilkan dengan memutar ulang SELURUH event secara berurutan,
 // bukan dibaca langsung dari satu nilai yang tersimpan.
 func Rebuild(events []Event) CaseState {
 	state := CaseState{Status: "belum_diajukan"}
-
 	for _, e := range events {
-		switch e.Type {
-		case "KasusDiajukan":
-			state.Status = "diajukan"
-		case "DokumenDiverifikasi":
-			state.Status = "diverifikasi"
-		case "DitinjauUlang":
-			state.Status = "ditinjau_ulang"
-		case "KasusDisetujui":
-			state.Status = "disetujui"
-		}
-		state.History = append(state.History, e)
+		applyEvent(&state, e)
 	}
 	return state
 }
 
-// RebuildFromSnapshot menunjukkan optimasi PRAKTIS — snapshot
-// BUKAN sumber kebenaran, hanya percepatan; state tetap bisa
-// dihitung ulang penuh dari event asli kalau snapshot hilang.
+// RebuildFromSnapshot menunjukkan optimasi praktis: snapshot bukan
+// sumber kebenaran, hanya percepatan. Hasilnya IDENTIK dengan
+// Rebuild(seluruh event sejak awal) — hanya lebih cepat karena tidak
+// perlu memutar ulang event sebelum snapshot.
 func RebuildFromSnapshot(snapshot CaseState, eventsSinceSnapshot []Event) CaseState {
 	state := snapshot
 	for _, e := range eventsSinceSnapshot {
-		fmt.Printf("menerapkan event pasca-snapshot: %s\n", e.Type)
-		// logika penerapan event sama seperti Rebuild
+		applyEvent(&state, e)
 	}
 	return state
 }

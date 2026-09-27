@@ -55,25 +55,35 @@ Diagram ini menunjukkan siklus lengkap yang mengulang kembali ke profiling kalau
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"runtime/pprof"
 	"time"
 )
 
-// LatihanOptimasiLengkap menunjukkan STRUKTUR kode untuk latihan
-// profiling menyeluruh — mengukur baseline, menjalankan dengan profiling
-// aktif, dan menyediakan titik untuk membandingkan hasil setelah
-// perbaikan diterapkan.
-func LatihanOptimasiLengkap() error {
-	// LANGKAH 2: ukur baseline SEBELUM perubahan apa pun.
-	mulai := time.Now()
-	jalankanEndpointSimulasi()
-	baselineDurasi := time.Since(mulai)
-	fmt.Printf("baseline durasi: %v\n", baselineDurasi)
+type Permohonan struct {
+	ID     int    `json:"id"`
+	Nomor  string `json:"nomor"`
+	Status string `json:"status"`
+}
 
-	// LANGKAH 3: aktifkan CPU profiling untuk menemukan lokasi masalah.
-	f, err := os.Create("cpu_sebelum.prof")
+// LatihanOptimasiLengkap menunjukkan struktur latihan profiling: ukur
+// baseline, jalankan beban yang sama dengan CPU profiling aktif, simpan
+// profilnya untuk dibandingkan dengan profil setelah perbaikan.
+func LatihanOptimasiLengkap(namaProfil string) error {
+	data := buatDataUji(5000)
+
+	// Langkah 2: baseline sebelum perubahan apa pun.
+	mulai := time.Now()
+	if err := jalankanEndpointSimulasi(data); err != nil {
+		return err
+	}
+	fmt.Printf("baseline satu eksekusi: %v\n", time.Since(mulai))
+
+	// Langkah 3: CPU profiling untuk menemukan lokasi masalah.
+	f, err := os.Create(namaProfil)
 	if err != nil {
 		return fmt.Errorf("buat file profil: %w", err)
 	}
@@ -82,23 +92,43 @@ func LatihanOptimasiLengkap() error {
 	if err := pprof.StartCPUProfile(f); err != nil {
 		return fmt.Errorf("mulai profiling: %w", err)
 	}
-	for i := 0; i < 100; i++ {
-		jalankanEndpointSimulasi()
+	defer pprof.StopCPUProfile()
+
+	for i := 0; i < 200; i++ {
+		if err := jalankanEndpointSimulasi(data); err != nil {
+			return err
+		}
 	}
-	pprof.StopCPUProfile()
-
-	fmt.Println("analisis: go tool pprof cpu_sebelum.prof")
-	// Setelah analisis (langkah 3-4), hipotesis dibentuk, diverifikasi
-	// lewat benchmark terisolasi (langkah 5), perbaikan diterapkan
-	// (langkah 6), lalu proses ini diulang dengan nama file berbeda
-	// (cpu_sesudah.prof) untuk perbandingan langsung (langkah 7).
-
 	return nil
 }
 
-func jalankanEndpointSimulasi() {
-	// simulasi logika endpoint yang sedang dianalisis
-	time.Sleep(10 * time.Millisecond)
+// jalankanEndpointSimulasi harus melakukan kerja CPU sungguhan. Simulasi
+// dengan time.Sleep tidak akan muncul di CPU profile sama sekali, karena
+// goroutine yang tidur tidak memakai CPU.
+func jalankanEndpointSimulasi(data []Permohonan) error {
+	if _, err := json.Marshal(data); err != nil {
+		return fmt.Errorf("marshal response: %w", err)
+	}
+	return nil
+}
+
+func buatDataUji(n int) []Permohonan {
+	hasil := make([]Permohonan, n)
+	for i := range hasil {
+		hasil[i] = Permohonan{ID: i, Nomor: fmt.Sprintf("P-%06d", i), Status: "menunggu"}
+	}
+	return hasil
+}
+
+func main() {
+	if err := LatihanOptimasiLengkap("cpu_sebelum.prof"); err != nil {
+		log.Fatal(err)
+	}
+	// Analisis: go tool pprof cpu_sebelum.prof. Setelah hipotesis
+	// dibentuk (langkah 4), diverifikasi dengan benchmark (langkah 5), dan
+	// perbaikan diterapkan (langkah 6), jalankan ulang dengan
+	// "cpu_sesudah.prof" lalu bandingkan: go tool pprof -diff_base
+	// cpu_sebelum.prof cpu_sesudah.prof.
 }
 ```
 
@@ -130,7 +160,7 @@ Mengikuti metodologi lengkap ini untuk setiap masalah performa kecil adalah usah
 
 > [!success]- Kunci jawaban
 > **1.** Tanpa baseline yang terukur dalam kondisi yang jelas dan konsisten (traffic yang sama, waktu yang sama, kondisi sistem yang sebanding), tidak ada dasar objektif untuk membandingkan "sebelum" dan "sesudah" — perbaikan yang terlihat berhasil bisa jadi kebetulan bersamaan dengan faktor lain yang berubah (traffic turun, komponen lain yang lebih cepat sesaat), bukan benar-benar disebabkan perubahan yang diterapkan. Baseline memberi titik pembanding yang solid untuk mengklaim perbaikan secara meyakinkan.
-> **4.** (1) Ukur baseline latency endpoint pencarian dokumen dari metrik yang sudah ada (dashboard p50/p95/p99, lihat [[Latency Percentiles (p50, p95, p99)]]) atau, kalau belum ada, jalankan load test singkat untuk mendapat angka awal yang konsisten; (2) aktifkan CPU dan heap profiling pada endpoint ini selama traffic normal berlangsung, atau selama load test terkontrol (`go tool pprof http://host/debug/pprof/profile?seconds=30`); (3) analisis hasil profiling (`top10`, `list`) untuk menemukan fungsi yang paling banyak menghabiskan waktu/memori — misalnya ternyata dominan di fungsi yang membangun query pencarian dengan `LIKE '%kata%'` (lihat [[../40 Databases/Inverted Indexes and How Search Engines Work|Inverted Indexes and How Search Engines Work]]); (4) bentuk hipotesis spesifik: "full table scan akibat LIKE tanpa index yang tepat adalah penyebab utama"; (5) verifikasi lewat `EXPLAIN` pada query yang teridentifikasi, mengonfirmasi full table scan benar-benar terjadi; (6) terapkan perbaikan yang ditargetkan (migrasi ke full-text search index, atau minimal index yang lebih tepat); (7) ukur ulang latency endpoint yang sama dalam kondisi traffic yang sebanding dengan baseline, bandingkan angkanya secara langsung; (8) kalau perbaikan signifikan dan terverifikasi, jalankan load test untuk mengonfirmasi perbaikan ini juga bertahan di bawah beban production yang representatif, bukan hanya di kondisi pengukuran kecil.
+> **4.** (1) Ukur baseline latency endpoint pencarian dokumen dari metrik yang sudah ada (dashboard p50/p95/p99, lihat [[Latency Percentiles (p50, p95, p99)]]) atau, kalau belum ada, jalankan load test singkat untuk mendapat angka awal yang konsisten. (2) Tentukan dulu apakah waktunya habis untuk **menghitung** atau **menunggu**. Ambil CPU profile selama traffic normal atau load test (`go tool pprof http://host/debug/pprof/profile?seconds=30`). Kalau CPU aplikasi rendah dan profilnya tidak menunjukkan hotspot, sementara latency tinggi, waktunya habis untuk menunggu sesuatu di luar proses. (3) Cari yang ditunggu: span database di distributed tracing, metrik durasi query, atau slow query log MariaDB. Misalnya ternyata query pencarian memakai `LIKE '%kata%'` yang memindai seluruh tabel (lihat [[../40 Databases/Inverted Indexes and How Search Engines Work|Inverted Indexes and How Search Engines Work]]). Kalau sebaliknya CPU profile didominasi fungsi aplikasi (misalnya serialisasi hasil), lanjutkan dengan `top10` dan `list` di pprof. (4) Bentuk hipotesis spesifik: "full table scan akibat `LIKE` tanpa index yang bisa dipakai adalah penyebab utama". (5) Verifikasi dengan `EXPLAIN` pada query itu, dan pastikan full table scan benar-benar terjadi. (6) Terapkan perbaikan yang ditargetkan (full-text index atau search engine terpisah). (7) Ukur ulang latency endpoint yang sama dalam kondisi yang sebanding dengan baseline. (8) Kalau perbaikannya signifikan, jalankan load test untuk mengonfirmasi hasilnya bertahan di bawah beban production yang representatif.
 
 ## Self-Check
 
@@ -149,7 +179,7 @@ Mengikuti metodologi lengkap ini untuk setiap masalah performa kecil adalah usah
 
 ## Further Reading
 
-- Brendan Gregg, materi tentang metodologi troubleshooting performa sistem secara umum (rujukan konseptual metodologi sistematis, relevan lintas bahasa pemrograman).
+- Brendan Gregg, *Systems Performance: Enterprise and the Cloud* (edisi ke-2, 2020), dan artikelnya tentang **USE Method** (Utilization, Saturation, Errors) di brendangregg.com — metodologi sistematis untuk menemukan bottleneck resource, relevan lintas bahasa pemrograman.
 
 ## Catatan Saya
 

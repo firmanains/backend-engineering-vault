@@ -62,24 +62,34 @@ func simpanDokumenBuffering(w http.ResponseWriter, r *http.Request) {
 
 // Streaming: memori tetap kecil dan konstan, berapa pun besar file-nya.
 func simpanDokumenStreaming(w http.ResponseWriter, r *http.Request) {
-    f, err := os.Create("/tmp/dokumen.pdf")
+    // CreateTemp memberi nama file unik, jadi upload yang berjalan
+    // bersamaan tidak saling menimpa file yang sama.
+    f, err := os.CreateTemp("", "dokumen-*.pdf")
     if err != nil {
         http.Error(w, "gagal membuat file", http.StatusInternalServerError)
         return
     }
-    defer f.Close()
 
-    // io.Copy membaca dari r.Body dan menulis ke f dalam potongan kecil
-    // (buffer internal 32 KB secara default), TIDAK PERNAH menampung
-    // seluruh isi file di memori sekaligus.
+    // io.Copy membaca dari r.Body dan menulis ke f dalam potongan kecil,
+    // TIDAK PERNAH menampung seluruh isi file di memori sekaligus.
     if _, err := io.Copy(f, r.Body); err != nil {
+        f.Close()
+        os.Remove(f.Name())
         http.Error(w, "gagal menyimpan", http.StatusInternalServerError)
         return
     }
+    // Error dari Close pada file yang ditulis wajib diperiksa: sebagian
+    // kegagalan tulis baru dilaporkan saat file ditutup.
+    if err := f.Close(); err != nil {
+        os.Remove(f.Name())
+        http.Error(w, "gagal menyimpan", http.StatusInternalServerError)
+        return
+    }
+    w.WriteHeader(http.StatusCreated)
 }
 ```
 
-Perbedaan `simpanDokumenBuffering` dan `simpanDokumenStreaming` bukan soal berapa baris kode — `io.Copy` di versi streaming secara internal memakai buffer kecil yang dipakai ulang, memproses data dalam potongan-potongan sambil mengalir dari `r.Body` (koneksi jaringan) langsung ke `f` (file di disk), tanpa titik mana pun yang menampung seluruh isi file di memori RAM sekaligus.
+Perbedaan `simpanDokumenBuffering` dan `simpanDokumenStreaming` bukan soal berapa baris kode — `io.Copy` di versi streaming secara internal memakai buffer kecil yang dipakai ulang (32 KB kalau tidak ada jalur yang lebih cepat; untuk tujuan `*os.File`, Go bahkan bisa memakai mekanisme kernel seperti `splice` di Linux sehingga data tidak pernah disalin ke user-space), memproses data dalam potongan-potongan sambil mengalir dari `r.Body` (koneksi jaringan) langsung ke `f` (file di disk), tanpa titik mana pun yang menampung seluruh isi file di memori RAM sekaligus.
 
 ## In His Stack
 

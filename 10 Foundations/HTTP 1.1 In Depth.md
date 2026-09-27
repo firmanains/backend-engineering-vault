@@ -70,6 +70,8 @@ sequenceDiagram
 
 Diagram ini menunjukkan persis head-of-line blocking yang dijelaskan di "The Problem": Request 3 tidak bisa "menyalip" Request 2 yang masih diproses server, meski secara teori Request 3 sendiri cepat untuk diproses.
 
+Spesifikasi HTTP/1.1 sebenarnya punya *pipelining*: client boleh mengirim Request 3 sebelum Response 2 datang. Tapi server tetap wajib mengirim response dalam urutan request, jadi Response 3 tetap tertahan di belakang Response 2. Dalam praktik, pipelining hampir tidak dipakai (browser mematikannya, dan client `net/http` Go tidak memakainya), sehingga model "satu request-response per koneksi pada satu waktu" adalah model yang benar untuk dipegang.
+
 ## In Go
 
 ```go
@@ -99,18 +101,18 @@ func documentHandler(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-Untuk mengendalikan berapa banyak koneksi paralel yang dibuka klien Go ke satu host (mitigasi langsung untuk masalah head-of-line blocking di "The Problem"), atur `MaxConnsPerHost` di `http.Transport`:
+Client `net/http` Go menghindari masalah di "The Problem" secara default. Ia tidak pernah mengirim request kedua ke koneksi yang masih sibuk; kalau tidak ada koneksi idle, ia membuka koneksi baru. `MaxConnsPerHost` bernilai nol secara default, artinya tanpa batas. Yang perlu diatur justru sebaliknya, yaitu batas atas, supaya client tidak membanjiri server dengan koneksi:
 
 ```go
-client := &http.Client{
+var client = &http.Client{
     Transport: &http.Transport{
-        MaxConnsPerHost:     10, // sampai 10 koneksi paralel ke host yang sama
-        MaxIdleConnsPerHost: 10,
+        MaxConnsPerHost:     10, // paling banyak 10 koneksi ke host yang sama
+        MaxIdleConnsPerHost: 10, // default-nya hanya 2, terlalu kecil untuk concurrency tinggi
     },
 }
 ```
 
-Dengan lebih dari satu koneksi tersedia, satu request lambat hanya memblokir request lain yang kebetulan berbagi koneksi yang sama dengannya — bukan seluruh trafik ke host itu.
+Begitu batas 10 tercapai, request ke-11 menunggu sampai ada koneksi yang bebas. Antrean ini adalah bentuk lain dari head-of-line blocking: satu request lambat yang memegang koneksi ikut menunda request lain yang sedang menunggu. Jadi batas koneksi adalah trade-off antara melindungi server dan latency client, bukan pengaturan yang hanya punya sisi baik.
 
 ## In His Stack
 
@@ -141,7 +143,7 @@ HTTP/1.1 dengan keep-alive adalah default yang wajar untuk hampir semua komunika
 4. Desain terbuka: sebuah tim integrasi partner melaporkan bahwa panggilan mereka ke API-mu "kadang terasa sangat lambat, kadang normal", dan pola ini muncul lebih sering saat mereka memakai satu koneksi HTTP persistent untuk banyak panggilan berurutan. Rancang penjelasan teknis untuk tim itu (yang mungkin tidak familiar dengan detail HTTP/1.1) dan rekomendasi konkret di sisi mereka maupun sisimu untuk mengatasi ini.
 
 > [!success]- Kunci jawaban
-> Penjelasan untuk tim partner: satu koneksi HTTP/1.1 hanya bisa menangani satu permintaan pada satu waktu — kalau salah satu dari deretan panggilan mereka kebetulan lambat (misalnya menyentuh endpoint yang berat), semua panggilan setelahnya di koneksi yang sama harus menunggu, meski endpoint yang mereka panggil setelahnya sebenarnya cepat. Rekomendasi di sisi mereka: buka beberapa koneksi paralel (misalnya lewat connection pool client HTTP mereka, analog dengan `MaxConnsPerHost` di Go) alih-alih satu koneksi tunggal untuk semua panggilan sekuensial, terutama kalau urutan panggilan tidak saling bergantung. Rekomendasi di sisimu: identifikasi endpoint mana yang secara konsisten lambat dan optimalkan dulu (biasanya soal query database, lihat [[../40 Databases/Reading EXPLAIN|Reading EXPLAIN]]), karena masalah ini akan tetap terasa oleh siapa pun yang kebetulan berbagi koneksi dengan panggilan lambat itu, apa pun jumlah koneksi paralel yang mereka buka.
+> Penjelasan untuk tim partner: satu koneksi HTTP/1.1 hanya bisa menangani satu permintaan pada satu waktu — kalau salah satu dari deretan panggilan mereka kebetulan lambat (misalnya menyentuh endpoint yang berat), semua panggilan setelahnya di koneksi yang sama harus menunggu, meski endpoint yang mereka panggil setelahnya sebenarnya cepat. Rekomendasi di sisi mereka: buka beberapa koneksi paralel (misalnya lewat connection pool client HTTP mereka, seperti yang dilakukan `http.Transport` Go secara default) alih-alih satu koneksi tunggal untuk semua panggilan sekuensial, terutama kalau urutan panggilan tidak saling bergantung. Rekomendasi di sisimu: identifikasi endpoint mana yang secara konsisten lambat dan optimalkan dulu (biasanya soal query database, lihat [[../40 Databases/Reading EXPLAIN|Reading EXPLAIN]]), karena masalah ini akan tetap terasa oleh siapa pun yang kebetulan berbagi koneksi dengan panggilan lambat itu, apa pun jumlah koneksi paralel yang mereka buka.
 
 ## Self-Check
 
